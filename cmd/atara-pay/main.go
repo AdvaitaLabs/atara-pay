@@ -6,6 +6,7 @@ import (
 
 	"github.com/atara-xyz/atara-pay/internal/adapters"
 	"github.com/atara-xyz/atara-pay/internal/adapters/crossmint"
+	"github.com/atara-xyz/atara-pay/internal/adapters/tempo"
 	"github.com/atara-xyz/atara-pay/internal/config"
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server"
@@ -29,7 +30,19 @@ func main() {
 			log.Fatalf("crossmint adapter: %v", err)
 		}
 		registered = append(registered, cm)
-		log.Println("[sangam] rail registered: crossmint")
+		log.Println("[atara-pay] rail registered: crossmint")
+	}
+
+	if cfg.TempoRPCURL != "" {
+		tp, err := tempo.New(tempo.Config{
+			RPCURL:  cfg.TempoRPCURL,
+			ChainID: cfg.TempoChainID,
+		}, nil)
+		if err != nil {
+			log.Fatalf("tempo adapter: %v", err)
+		}
+		registered = append(registered, tp)
+		log.Printf("[atara-pay] rail registered: tempo (chainId=%d)", cfg.TempoChainID)
 	}
 
 	if len(registered) == 0 {
@@ -40,7 +53,7 @@ func main() {
 	s := server.New(r)
 
 	addr := ":" + cfg.Port
-	log.Printf("[sangam] listening on %s (default rail: %s)", addr, cfg.DefaultRail)
+	log.Printf("[atara-pay] listening on %s (default rail: %s)", addr, cfg.DefaultRail)
 	if err := s.Listen(addr); err != nil {
 		log.Fatal(err)
 	}

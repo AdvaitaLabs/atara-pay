@@ -2,8 +2,8 @@
 # Atara-Pay — quickstart curl examples.
 #
 # Prereqs:
-#   1. cp .env.example .env  &&  fill CROSSMINT_API_KEY (use a staging key)
-#   2. go run ./cmd/sangam   (server on :8080)
+#   1. cp .env.example .env  &&  fill CROSSMINT_API_KEY  +  TEMPO_RPC_URL / TEMPO_CHAIN_ID
+#   2. go run ./cmd/atara-pay   (server on :8080)
 
 set -euo pipefail
 BASE="${BASE:-http://localhost:8080}"

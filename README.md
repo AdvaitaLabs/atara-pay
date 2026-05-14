@@ -83,7 +83,7 @@ Switch providers by changing **one config line**. No SDK install. No business-lo
 | Rail | Wallet | Send | Onramp | Status |
 |---|---|---|---|---|
 | **CrossMint** | EVM/Solana/Stellar | ✅ | ✅ Credit card → USDC | ✅ shipped |
-| **Tempo** | Tempo L1 | pathUSD + session keys | ❌ (no fiat rail) | 🚧 next |
+| **Tempo** | Tempo L1 (EOA) | ✅ pathUSD (TIP-20) | ❌ (no fiat rail) | ✅ shipped |
 | **Loka P2P Lightning** | LN + Sui | sats / SUI / hold-invoice | ❌ (use OTC) | ⏳ planned |
 | **Atara OTC** | — | large-volume fiat ↔ stablecoin | ✅ | ⏳ planned |
 
@@ -172,9 +172,9 @@ ATARA_PAY_ROUTING_MODE=smart
 CROSSMINT_API_KEY=sk_staging_xxx
 CROSSMINT_BASE_URL=https://staging.crossmint.com
 
-# Tempo (planned)
-TEMPO_RPC_URL=
-TEMPO_PRIVATE_KEY=
+# Tempo — public testnet defaults shown
+TEMPO_RPC_URL=https://rpc.moderato.tempo.xyz
+TEMPO_CHAIN_ID=42431
 ```
 
 Disable a rail by leaving its keys blank — ATARA-Pay will skip it at boot.
@@ -192,7 +192,7 @@ atara-pay/
 │   ├── adapters/
 │   │   ├── adapter.go          # the Adapter contract
 │   │   ├── crossmint/          # ✅ shipped
-│   │   └── tempo/              # 🚧 next
+│   │   └── tempo/              # ✅ shipped
 │   ├── types/                  # unified Wallet / Tx / Order
 │   ├── config/
 │   └── errors/
@@ -207,7 +207,8 @@ atara-pay/
 
 - [x] Project skeleton + design
 - [x] CrossMint adapter (wallets, transfers, onramp)
-- [ ] Tempo adapter (wallets, pathUSD, session keys) ← **current**
+- [x] Tempo adapter (wallets, pathUSD transfers)
+- [ ] Tempo session keys (AI-agent spending limits) ← **current**
 - [ ] Loka P2P Lightning adapter
 - [ ] Smart router (quote + failover)
 - [ ] Atara OTC adapter
