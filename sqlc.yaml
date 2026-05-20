@@ -9,6 +9,7 @@ sql:
       - "internal/db/migrations/000003_transactions_and_onramp.up.sql"
       - "internal/db/migrations/000004_session_keys_and_limits.up.sql"
       - "internal/db/migrations/000005_webhooks.up.sql"
+      - "internal/db/migrations/000006_virtual_addresses.up.sql"
 
     queries: "internal/db/queries"
 

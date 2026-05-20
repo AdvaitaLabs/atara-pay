@@ -37,6 +37,9 @@ type Querier interface {
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	// Users are the humans logging into the dashboard. Always tenant-scoped.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// TIP-1022 virtual addresses. (wallet_id, label) is the natural idempotency
+	// key — the same label always resolves to the same on-chain address.
+	CreateVirtualAddress(ctx context.Context, arg CreateVirtualAddressParams) (VirtualAddress, error)
 	// One wallet = one on-chain account on one rail (CrossMint / Tempo /
 	// Loka-LN). Wallets belong to exactly one wallet_group via group_id.
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (Wallet, error)
@@ -87,6 +90,12 @@ type Querier interface {
 	// Login flow: email + tenant_id is the unique pair.
 	GetUserByEmailInTenant(ctx context.Context, arg GetUserByEmailInTenantParams) (User, error)
 	GetUserByID(ctx context.Context, id string) (User, error)
+	// Reverse lookup for incoming-deposit webhooks: "which virtual address
+	// received this transfer?"
+	GetVirtualAddressByAddress(ctx context.Context, address string) (VirtualAddress, error)
+	// Idempotency path: if the customer asks for label "invoice-42" twice we
+	// return the same row (and skip re-registering on chain).
+	GetVirtualAddressByLabel(ctx context.Context, arg GetVirtualAddressByLabelParams) (VirtualAddress, error)
 	// Reverse lookup for incoming-transfer webhooks. The address index is
 	// partial on status='active' so deleted wallets don't clutter it.
 	GetWalletByAddress(ctx context.Context, address string) (Wallet, error)
@@ -105,6 +114,16 @@ type Querier interface {
 	GetWalletGroupByOwnerRef(ctx context.Context, arg GetWalletGroupByOwnerRefParams) (WalletGroup, error)
 	GetWebhookEndpointByID(ctx context.Context, id string) (WebhookEndpoint, error)
 	GetWebhookEventByID(ctx context.Context, id string) (WebhookEvent, error)
+	// M9 accounting / statements queries.
+	//
+	// These are pure read aggregates over the existing transactions +
+	// onramp_orders tables. No new schema needed — we compute totals on the
+	// fly. Once volume justifies it, M9.2 can pre-materialize a
+	// monthly_statements rollup.
+	// Sum of succeeded outbound transfers BY asset for a wallet group across
+	// all rails. Plus inbound (received) totals for completeness. Caller
+	// subtracts to compute "net spent" in the dashboard if they want.
+	GroupBalanceSummary(ctx context.Context, groupID string) ([]GroupBalanceSummaryRow, error)
 	// Dashboard listing. Includes revoked keys so customers can audit.
 	ListAPIKeysInTenant(ctx context.Context, tenantID string) ([]ApiKey, error)
 	// The publisher fans out one domain event to every active subscriber of
@@ -142,6 +161,7 @@ type Querier interface {
 	// Used by the dashboard "remaining today / this week / this month" view.
 	ListUsageCountersForPolicy(ctx context.Context, policyID string) ([]UsageCounter, error)
 	ListUsersInTenant(ctx context.Context, tenantID string) ([]User, error)
+	ListVirtualAddressesForWallet(ctx context.Context, arg ListVirtualAddressesForWalletParams) ([]VirtualAddress, error)
 	// Dashboard listing. Filter by owner_type (e.g. only show agents) is
 	// handled at the application layer.
 	ListWalletGroupsInTenant(ctx context.Context, arg ListWalletGroupsInTenantParams) ([]WalletGroup, error)
@@ -176,6 +196,15 @@ type Querier interface {
 	// Cascades to the wallets table via the foreign key (which then go
 	// status='deleted' through the same touch trigger).
 	SoftDeleteWalletGroup(ctx context.Context, id string) error
+	// Same window applied to onramp_orders. Fiat IN totals separately from
+	// crypto delivered so customers can see "you bought $X of USDC via N
+	// transactions" without joining tables.
+	TenantMonthlyOnramp(ctx context.Context, arg TenantMonthlyOnrampParams) ([]TenantMonthlyOnrampRow, error)
+	// Per-(asset, direction) totals for a tenant in one month. The month
+	// boundary is computed by the caller; pass start (inclusive) and end
+	// (exclusive). Index hit: tenant_id is the most-selective FK on
+	// transactions, then created_at limits the scan further.
+	TenantMonthlyStatement(ctx context.Context, arg TenantMonthlyStatementParams) ([]TenantMonthlyStatementRow, error)
 	TouchAPIKeyUsage(ctx context.Context, id string) error
 	TouchUserLogin(ctx context.Context, id string) error
 	// Bumps the failure counter and returns the new value so the worker can

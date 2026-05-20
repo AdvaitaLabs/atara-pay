@@ -172,6 +172,18 @@ type User struct {
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
+type VirtualAddress struct {
+	ID                 string             `json:"id"`
+	TenantID           string             `json:"tenant_id"`
+	WalletID           string             `json:"wallet_id"`
+	GroupID            string             `json:"group_id"`
+	Label              string             `json:"label"`
+	Address            string             `json:"address"`
+	RegistrationTxHash pgtype.Text        `json:"registration_tx_hash"`
+	Metadata           []byte             `json:"metadata"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type Wallet struct {
 	ID                  string             `json:"id"`
 	GroupID             string             `json:"group_id"`
