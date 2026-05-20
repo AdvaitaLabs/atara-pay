@@ -118,6 +118,8 @@ func (s *Server) routes() {
 	// Dual-rail wallet-group endpoints.
 	if s.wgHandlers != nil {
 		v1.Post("/wallet-groups", s.wgHandlers.Create)
+		v1.Get("/wallet-groups", s.wgHandlers.List)
+		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
 	}
 
 	// Rail-backed routes (unchanged from MVP).

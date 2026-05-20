@@ -260,6 +260,88 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Read endpoints
+// ──────────────────────────────────────────────────────────────────────
+
+// Get implements GET /v1/wallet-groups/:id. Returns the group and its
+// wallets (CrossMint + Tempo + any future rails), tenant-scoped — a leaked
+// group id from one tenant cannot read another tenant's data.
+func (h *WalletGroups) Get(c *fiber.Ctx) error {
+	tenantID := middleware.TenantID(c)
+	if tenantID == "" {
+		return badRequest(c, "missing tenant context")
+	}
+	groupID := c.Params("id")
+	if groupID == "" {
+		return badRequest(c, "missing id")
+	}
+
+	ctx := c.UserContext()
+
+	group, err := h.q.GetWalletGroupByID(ctx, groupID)
+	if err != nil || group.TenantID != tenantID {
+		// Same 404 either way so cross-tenant probes can't tell whether
+		// the id exists in some other tenant.
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "wallet group not found"})
+	}
+
+	wallets, err := h.q.ListWalletsByGroup(ctx, group.ID)
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	return c.JSON(toGroupView(group, wallets))
+}
+
+// ListGroupsResponse wraps the page under a "data" field, leaving room to
+// add pagination metadata later without breaking clients.
+type ListGroupsResponse struct {
+	Data []GroupView `json:"data"`
+}
+
+// List implements GET /v1/wallet-groups. Returns the tenant's groups in
+// reverse-chronological order; supports ?limit (default 50, max 200) and
+// ?offset cursor-less paging until M9 puts in a proper one.
+func (h *WalletGroups) List(c *fiber.Ctx) error {
+	tenantID := middleware.TenantID(c)
+	if tenantID == "" {
+		return badRequest(c, "missing tenant context")
+	}
+
+	limit := c.QueryInt("limit", 50)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := c.QueryInt("offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+
+	ctx := c.UserContext()
+	groups, err := h.q.ListWalletGroupsInTenant(ctx, sqlcgen.ListWalletGroupsInTenantParams{
+		TenantID: tenantID,
+		Limit:    int32(limit),
+		Offset:   int32(offset),
+	})
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	// N+1 by design for now — wallet lists are tiny (1–3 rows per group).
+	// Once we have 5+ rails or millions of groups, swap for a single
+	// JOIN query with array_agg.
+	views := make([]GroupView, len(groups))
+	for i, g := range groups {
+		wallets, werr := h.q.ListWalletsByGroup(ctx, g.ID)
+		if werr != nil {
+			return internalError(c, werr)
+		}
+		views[i] = toGroupView(g, wallets)
+	}
+	return c.JSON(ListGroupsResponse{Data: views})
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // helpers (file-local)
 // ──────────────────────────────────────────────────────────────────────
 
