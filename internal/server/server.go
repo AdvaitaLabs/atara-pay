@@ -122,8 +122,12 @@ func New(d Deps) *Server {
 		// generated private key before persistence). Mounted alongside
 		// the wallet-group routes since session keys are scoped to a
 		// wallet inside a group.
+		//
+		// d.Tempo is passed through — when nil, on-chain enforcement is
+		// rejected at validateMint with a clean error; everything else
+		// (gateway-only session keys) keeps working.
 		if d.Keystore != nil {
-			skSvc := sessionkey.New(d.Pool, d.Keystore)
+			skSvc := sessionkey.New(d.Pool, d.Keystore, d.Tempo)
 			s.sessionKeyHandlers = handlers.NewSessionKeys(d.Pool, skSvc, publisher)
 		}
 

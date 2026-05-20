@@ -5,8 +5,18 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/atara-xyz/atara-pay/internal/adapters/tempo"
 )
+
+// commonPathUSD wraps the pathUSD precompile address in the common.Address
+// type used by tempo.AllowedCall.Target. Kept local so callers don't import
+// go-ethereum directly.
+func commonPathUSD() common.Address {
+	return common.HexToAddress(tempo.PathUSDAddress)
+}
 
 // pgx column constructors. Each mirrors the handlers package's helpers but
 // is kept local so this package has zero handlers imports — sessionkey is

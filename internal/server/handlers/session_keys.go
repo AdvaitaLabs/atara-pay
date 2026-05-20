@@ -84,9 +84,16 @@ type CreateSessionKeyRequest struct {
 		DeniedRecipients  []string `json:"denied_recipients,omitempty"`
 	} `json:"limits"`
 
-	RotationMode         string `json:"rotation_mode,omitempty"`
-	RotationIntervalHours int   `json:"rotation_interval_hours,omitempty"`
-	ExpiresAt            string `json:"expires_at,omitempty"` // RFC 3339
+	RotationMode          string `json:"rotation_mode,omitempty"`
+	RotationIntervalHours int    `json:"rotation_interval_hours,omitempty"`
+	ExpiresAt             string `json:"expires_at,omitempty"` // RFC 3339
+
+	// OnChainEnforce, when true, broadcasts an authorizeKey() call to the
+	// Tempo AccountKeychain precompile so the daily cap becomes
+	// chain-enforced in addition to gateway-enforced. Requires rail=tempo.
+	// Customers paying for the on-chain belt-and-suspenders flip this to
+	// true; everyone else stays at gateway-only (the default).
+	OnChainEnforce bool `json:"on_chain_enforce,omitempty"`
 }
 
 // CreateSessionKeyResponse returns SessionKeyView PLUS the raw private key.
@@ -174,6 +181,12 @@ func (h *SessionKeys) Create(c *fiber.Ctx) error {
 		expiresAt = t
 	}
 
+	// On-chain enforce requires rail=tempo. Reject cleanly so we don't
+	// burn an authorizeKey attempt against the wrong rail.
+	if req.OnChainEnforce && rail != string(apitypes.RailTempo) {
+		return badRequest(c, "on_chain_enforce requires rail=tempo")
+	}
+
 	interval := int32(req.RotationIntervalHours) * 3600
 	minted, err := h.svc.Mint(ctx, sessionkey.MintInput{
 		TenantID: tenantID,
@@ -191,6 +204,7 @@ func (h *SessionKeys) Create(c *fiber.Ctx) error {
 		RotationMode:      req.RotationMode,
 		RotationIntervalS: interval,
 		ExpiresAt:         expiresAt,
+		OnChainEnforce:    req.OnChainEnforce,
 	})
 	if err != nil {
 		return internalError(c, err)

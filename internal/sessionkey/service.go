@@ -33,18 +33,24 @@ import (
 
 // Service is concurrency-safe. Build one and share.
 type Service struct {
-	pool *pgxpool.Pool
-	q    *sqlcgen.Queries
-	ks   keystore.Keystore
+	pool  *pgxpool.Pool
+	q     *sqlcgen.Queries
+	ks    keystore.Keystore
+	tempo *tempo.Adapter // optional — required only when MintInput.OnChainEnforce is set
 }
 
 // New constructs a Service. Keystore is required — every session key's
 // private bytes go through it before persistence.
-func New(pool *pgxpool.Pool, ks keystore.Keystore) *Service {
+//
+// tempoAdapter is optional: pass nil to disable on-chain enforcement. When
+// nil, MintInput.OnChainEnforce=true is rejected at validateMint time so
+// callers get a clean error instead of a half-completed mint.
+func New(pool *pgxpool.Pool, ks keystore.Keystore, tempoAdapter *tempo.Adapter) *Service {
 	return &Service{
-		pool: pool,
-		q:    sqlcgen.New(pool),
-		ks:   ks,
+		pool:  pool,
+		q:     sqlcgen.New(pool),
+		ks:    ks,
+		tempo: tempoAdapter,
 	}
 }
 
@@ -78,18 +84,31 @@ type MintInput struct {
 	RotationIntervalS int32
 	// ExpiresAt zero → default 24h from now.
 	ExpiresAt time.Time
+
+	// OnChainEnforce, when true, broadcasts an AccountKeychain.authorizeKey
+	// call to Tempo using the wallet's master key. The resulting
+	// session_keys row carries rail_native=true + on_chain_tx_hash. Only
+	// valid when the wallet is rail=tempo / custody=platform; mismatches
+	// fail before any signature happens. nil tempo Adapter on the Service
+	// also fails fast.
+	OnChainEnforce bool
 }
 
 // Minted is what Mint returns to the caller. PrivateKey is the ONLY way the
 // raw secret will ever leave the server — store it immediately.
 type Minted struct {
-	ID              string
-	PublicAddress   string
-	PrivateKey      []byte // 32-byte secp256k1 raw key
-	PolicyID        string
-	ExpiresAt       time.Time
-	NextRotationAt  time.Time
-	RotationMode    string
+	ID             string
+	PublicAddress  string
+	PrivateKey     []byte // 32-byte secp256k1 raw key
+	PolicyID       string
+	ExpiresAt      time.Time
+	NextRotationAt time.Time
+	RotationMode   string
+
+	// On-chain attestation. Populated only when MintInput.OnChainEnforce
+	// was true and the authorizeKey broadcast succeeded.
+	RailNative    bool
+	OnChainTxHash string
 }
 
 // Mint provisions a new session key:
@@ -149,6 +168,25 @@ func (s *Service) Mint(ctx context.Context, in MintInput) (*Minted, error) {
 	sessionKeyID := id.New(id.PrefixSessionKey)
 	policyID := id.New(id.PrefixLimitPolicy)
 
+	// Step 3b (optional): on-chain authorizeKey.
+	//
+	// Done OUTSIDE the DB transaction so a broadcast failure leaves no DB
+	// state behind to clean up (we just return the error and let the
+	// caller retry). On success we capture the tx hash and stamp it into
+	// the session_keys row in step 4b.
+	var (
+		railNative    bool
+		onChainTxHash string
+	)
+	if in.OnChainEnforce {
+		hash, err := s.runOnChainAuthorize(ctx, in, addr, expiresAt)
+		if err != nil {
+			return nil, err
+		}
+		railNative = true
+		onChainTxHash = hash
+	}
+
 	// Step 4: short atomic transaction.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -198,8 +236,8 @@ func (s *Service) Mint(ctx context.Context, in MintInput) (*Minted, error) {
 		NextRotationAt:    pgxOptTimestamp(nextRotation),
 		ExpiresAt:         pgxRequiredTimestamp(expiresAt),
 		Status:            "active",
-		RailNative:        false,
-		OnChainTxHash:     pgxOptText(""),
+		RailNative:        railNative,
+		OnChainTxHash:     pgxOptText(onChainTxHash),
 		Metadata:          []byte("{}"),
 	}); err != nil {
 		return nil, fmt.Errorf("sessionkey: insert row: %w", err)
@@ -218,7 +256,75 @@ func (s *Service) Mint(ctx context.Context, in MintInput) (*Minted, error) {
 		ExpiresAt:      expiresAt,
 		NextRotationAt: nextRotation,
 		RotationMode:   rotationMode,
+		RailNative:     railNative,
+		OnChainTxHash:  onChainTxHash,
 	}, nil
+}
+
+// runOnChainAuthorize loads the wallet, decrypts its master key, builds
+// the KeyRestrictions snapshot, broadcasts the AccountKeychain
+// .authorizeKey() call, and returns the resulting tx hash.
+//
+// Sequence is deliberately tight around the plaintext master key:
+// decrypt → use → zero. The plaintext NEVER reaches a goroutine boundary,
+// so escape analysis keeps it on the stack of this function alone.
+func (s *Service) runOnChainAuthorize(
+	ctx context.Context, in MintInput, sessionKeyAddr string, expiresAt time.Time,
+) (string, error) {
+	if s.tempo == nil {
+		return "", errors.New("sessionkey: on-chain enforce requested but tempo adapter not configured")
+	}
+
+	wallet, err := s.q.GetWalletByID(ctx, in.WalletID)
+	if err != nil {
+		return "", fmt.Errorf("sessionkey: load wallet: %w", err)
+	}
+	if wallet.Rail != "tempo" {
+		return "", fmt.Errorf("sessionkey: on-chain enforce requires rail=tempo (got %q)", wallet.Rail)
+	}
+	if wallet.Custody != "platform" {
+		return "", fmt.Errorf("sessionkey: on-chain enforce requires custody=platform (got %q)", wallet.Custody)
+	}
+	if len(wallet.EncryptedPrivateKey) == 0 || !wallet.KeyVersion.Valid {
+		return "", errors.New("sessionkey: wallet has no encrypted master key (schema invariant violated)")
+	}
+
+	master, err := s.ks.Decrypt(wallet.EncryptedPrivateKey, wallet.KeyVersion.Int16)
+	if err != nil {
+		return "", fmt.Errorf("sessionkey: decrypt master: %w", err)
+	}
+	defer zero(master)
+
+	// Translate the policy's daily cap into a single on-chain TokenLimit
+	// for pathUSD. Weekly / monthly stay gateway-only — the precompile's
+	// (token, period) model supports them too, but the dashboard story
+	// for "your AI agent has 3 simultaneous chain-enforced caps" lands
+	// in M9. Per-tx is gateway-enforced regardless; the chain has no
+	// per-call concept.
+	var limits []tempo.TokenLimit
+	if in.Limits.DailyUSD > 0 {
+		limits = append(limits, tempo.PathUSDDailyLimit(in.Limits.DailyUSD*1_000_000))
+	}
+
+	txHash, err := s.tempo.AuthorizeKey(ctx, tempo.AuthorizeKeyInput{
+		WalletPrivKey:     master,
+		WalletAddress:     wallet.Address,
+		SessionKeyAddress: sessionKeyAddr,
+		SignatureType:     tempo.SigTypeSecp256k1,
+		Restrictions: tempo.KeyRestrictions{
+			Expiry:        uint64(expiresAt.Unix()),
+			EnforceLimits: true,
+			Limits:        limits,
+			AllowAnyCalls: false,
+			AllowedCalls: []tempo.AllowedCall{
+				tempo.TransferOnly(commonPathUSD()),
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("sessionkey: on-chain authorize: %w", err)
+	}
+	return txHash, nil
 }
 
 // validateMint catches the inputs we never want to persist.
