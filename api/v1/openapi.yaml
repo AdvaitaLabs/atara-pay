@@ -609,6 +609,234 @@ components:
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
 
+    # ────────────────────────────────────────────────────────────────────
+    # Session keys (delegated signers for AI agents)
+    # ────────────────────────────────────────────────────────────────────
+    RotationMode:
+      type: string
+      enum: [auto_rotate, notify_only, hard_expire]
+      description: |
+        How Atara handles the rotation cursor.
+        - `auto_rotate`: server mints a replacement key + ships it via
+          webhook (`session_key.rotated`) at the configured interval.
+        - `notify_only`: emit `session_key.expiring_soon` 24h ahead; the
+          customer schedules their own replacement call.
+        - `hard_expire`: nothing happens, the key just stops working at
+          `expires_at`.
+
+    SessionKeyLimits:
+      type: object
+      required: [per_tx_amount, daily_amount, weekly_amount, monthly_amount]
+      properties:
+        per_tx_amount:  { type: string, example: "1" }
+        daily_amount:   { type: string, example: "5" }
+        weekly_amount:  { type: string, example: "30" }
+        monthly_amount: { type: string, example: "100" }
+        allowed_recipients:
+          type: array
+          items: { type: string }
+          example: ["merchant:openai", "merchant:prakasa"]
+        denied_recipients:
+          type: array
+          items: { type: string }
+
+    CreateSessionKeyRequest:
+      type: object
+      required: [name, limits]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: "alice-ai-tutor"
+        rail:
+          type: string
+          enum: [tempo, crossmint]
+          default: tempo
+          description: |
+            Wallet anchor for the session key. Defaults to Tempo (the
+            AI-agent use case is the primary one).
+        limits: { $ref: '#/components/schemas/SessionKeyLimits' }
+        rotation_mode: { $ref: '#/components/schemas/RotationMode' }
+        rotation_interval_hours:
+          type: integer
+          minimum: 0
+          maximum: 720
+          default: 24
+        expires_at:
+          type: string
+          format: date-time
+          description: RFC 3339. Defaults to now + 24h.
+        on_chain_enforce:
+          type: boolean
+          default: false
+          description: |
+            When true (requires rail=tempo), Atara broadcasts an
+            `authorizeKey` call to the Tempo AccountKeychain precompile.
+            The daily cap becomes CHAIN-ENFORCED in addition to
+            gateway-enforced — an attacker who steals the session key's
+            private bytes can still spend no more than the daily cap per
+            24h because the precompile reverts past it.
+
+    SessionKey:
+      type: object
+      required: [id, name, wallet_id, group_id, public_address, status, rotation_mode, rail_native]
+      properties:
+        id:              { type: string, example: "sk_01J9K…" }
+        name:            { type: string }
+        wallet_id:       { type: string }
+        group_id:        { type: string }
+        public_address:  { type: string, example: "0xAGENT…" }
+        policy_id:       { type: string }
+        status:
+          type: string
+          enum: [active, rotating, expired, revoked]
+        rotation_mode:       { $ref: '#/components/schemas/RotationMode' }
+        rotation_interval_s: { type: integer }
+        expires_at:          { type: string, format: date-time }
+        next_rotation_at:   { type: string, format: date-time }
+        rail_native:
+          type: boolean
+          description: |
+            true iff the Tempo precompile attests this key. The
+            `authorizeKey()` tx is in `on_chain_tx_hash` of the
+            full server-side row.
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+
+    CreateSessionKeyResponse:
+      allOf:
+        - $ref: '#/components/schemas/SessionKey'
+        - type: object
+          required: [private_key]
+          properties:
+            private_key:
+              type: string
+              description: |
+                Lowercase-hex 64 chars (32 bytes) — the secp256k1 raw
+                private key. Returned ONLY here. Atara never stores it
+                in plaintext after this call.
+            _notice: { type: string }
+
+    RevokeSessionKeyRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional audit-trail note. Defaults to "manually revoked".
+
+    ListSessionKeysResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/SessionKey' }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Webhooks
+    # ────────────────────────────────────────────────────────────────────
+    WebhookEventType:
+      type: string
+      description: |
+        Canonical event names. Subscribers list these in
+        `subscribed_events`; empty array means "all events".
+      enum:
+        - onramp.created
+        - onramp.completed
+        - onramp.failed
+        - transaction.succeeded
+        - transaction.failed
+        - session_key.created
+        - session_key.expired
+        - session_key.revoked
+        - session_key.rotated
+        - limit.exceeded
+        - wallet_group.created
+
+    EndpointStatus:
+      type: string
+      enum: [active, paused, deleted]
+
+    WebhookEndpoint:
+      type: object
+      description: |
+        Safe-to-return projection. The HMAC secret is omitted — only its
+        version is exposed so customers can audit "yes I have v3 too"
+        without re-leaking the secret bytes.
+      required: [id, url, subscribed_events, status, secret_version]
+      properties:
+        id:  { type: string, example: "we_01J9K…" }
+        url: { type: string, format: uri, example: "https://customer.com/atara" }
+        subscribed_events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+          description: Empty array = subscribe to ALL events.
+        status:         { $ref: '#/components/schemas/EndpointStatus' }
+        description:    { type: string }
+        secret_version: { type: integer, example: 1 }
+        consecutive_failures: { type: integer }
+        last_success_at: { type: string, format: date-time }
+        last_failure_at: { type: string, format: date-time }
+        created_at:      { type: string, format: date-time }
+
+    WebhookEndpointWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpoint'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: |
+                Base64-encoded 32-byte HMAC secret. Returned ONLY at
+                creation and rotation. Customers verify outgoing
+                webhooks via
+                  HMAC-SHA256(decode(secret), raw_body)
+                compared against the `X-Atara-Signature` header.
+            _notice: { type: string }
+
+    CreateEndpointRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: |
+            HTTPS required. http allowed only for localhost (development).
+        subscribed_events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+        description: { type: string }
+
+    UpdateEndpointRequest:
+      type: object
+      description: |
+        PATCH semantics: omitted fields = no change. Pointer-style nulls
+        in code map to JSON `null`/missing here.
+      properties:
+        url:
+          type: string
+          format: uri
+        subscribed_events:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+        description: { type: string }
+        status:
+          type: string
+          enum: [active, paused]
+          description: |
+            Customers can pause/resume; `deleted` is reserved for the
+            DELETE endpoint.
+
+    ListEndpointsResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEndpoint' }
+
 # ──────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────
@@ -1006,5 +1234,291 @@ paths:
             application/json: { schema: { $ref: '#/components/schemas/Error' } }
         '502':
           description: Upstream rail error
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Session keys (per-wallet AI-agent delegated signers)
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/wallet-groups/{id}/session-keys:
+    post:
+      tags: [Session Keys]
+      operationId: createSessionKey
+      summary: Mint a session key for one of the group's wallets
+      description: |
+        Generates a secp256k1 keypair, encrypts the private bytes
+        (AES-256-GCM via the keystore master key), inserts both a
+        dedicated `limit_policy` and the `session_keys` row in ONE
+        transaction. When `on_chain_enforce` is true (Tempo only), an
+        `authorizeKey()` is broadcast first and its tx hash is stamped
+        on the row.
+
+        The raw `private_key` field is returned ONCE. Store it into the
+        AI agent's runtime immediately.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSessionKeyRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateSessionKeyResponse' }
+        '400':
+          description: Invalid input (bad rotation_mode, on_chain_enforce without rail=tempo, etc.)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Role cannot create session keys (owner/admin required)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '422':
+          description: Group has no active wallet on the requested rail
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    get:
+      tags: [Session Keys]
+      operationId: listSessionKeys
+      summary: List session keys for every wallet in the group
+      description: |
+        Includes revoked / expired so dashboards can audit history.
+        Sort: most-recent first.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListSessionKeysResponse' }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/wallet-groups/{id}/session-keys/{sk_id}:
+    delete:
+      tags: [Session Keys]
+      operationId: revokeSessionKey
+      summary: Revoke a session key
+      description: |
+        Idempotent. Already-revoked / expired keys are returned
+        unchanged; the original revoked_at is preserved on re-delete.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: sk_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeSessionKeyRequest' }
+      responses:
+        '200':
+          description: Revoked (or already inactive)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionKey' }
+        '403':
+          description: Role cannot revoke session keys
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Session key not found in this tenant
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Webhook endpoints
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/webhook-endpoints:
+    post:
+      tags: [Webhooks]
+      operationId: createWebhookEndpoint
+      summary: Register a webhook receiver
+      description: |
+        Mints a 32-byte HMAC secret bound to this endpoint. The raw
+        secret is returned ONCE (base64-encoded). Use it to verify every
+        outbound delivery via
+          HMAC-SHA256(decode(secret), raw_body) == X-Atara-Signature
+
+        Each delivery also carries:
+          X-Atara-Event-Id          unique webhook_event id
+          X-Atara-Event-Type        e.g. "transaction.succeeded"
+          X-Atara-Signature-Version which secret revision signed it
+
+        Use the event id as the idempotency key on your side — Atara
+        retries with exponential backoff (30s → 2m → 10m → 1h → 6h →
+        24h, cap) for up to 8 attempts before marking the event dead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEndpointRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '400':
+          description: Invalid URL (must be https or http://localhost) or event names
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Role cannot manage webhook endpoints
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookEndpoints
+      summary: List the tenant's webhook receivers
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListEndpointsResponse' }
+
+  /v1/webhook-endpoints/{id}:
+    get:
+      tags: [Webhooks]
+      operationId: getWebhookEndpoint
+      summary: Fetch one receiver
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '404':
+          description: Not found in this tenant
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    patch:
+      tags: [Webhooks]
+      operationId: updateWebhookEndpoint
+      summary: Partially update a receiver
+      description: |
+        Body fields are optional; omitted = no change. status accepts
+        only `active` or `paused` — `deleted` is reserved for the
+        DELETE route.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEndpointRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '400':
+          description: Invalid url / event names / status
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Role cannot modify webhook endpoints
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhookEndpoint
+      summary: Soft delete a receiver
+      description: |
+        Idempotent. The row stays at `status=deleted` so historical
+        webhook_events still resolve their endpoint reference.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted (or already deleted)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '403':
+          description: Role cannot delete webhook endpoints
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/webhook-endpoints/{id}/rotate-secret:
+    post:
+      tags: [Webhooks]
+      operationId: rotateWebhookSecret
+      summary: Mint a new HMAC secret for the endpoint
+      description: |
+        Bumps `secret_version` atomically. Events ALREADY queued under
+        the prior version keep signing with that version (stamped on
+        each `webhook_events` row) so receivers verifying via the
+        version header continue to succeed during the rollover window.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: New secret minted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '403':
+          description: Role cannot rotate webhook secrets
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Not found
           content:
             application/json: { schema: { $ref: '#/components/schemas/Error' } }
