@@ -33,6 +33,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	"github.com/atara-xyz/atara-pay/internal/sessionkey"
 	"github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 )
 
 // Deps bundles everything the server needs to wire its routes. Constructed
@@ -99,11 +100,15 @@ func New(d Deps) *Server {
 		// accumulators no-op until Redis is wired by a later sprint.
 		limitsSvc := limits.New(handlers.NewQueriesForMiddleware(d.Pool), d.Redis)
 
+		// Outbound webhook publisher. Shared by every handler that emits
+		// domain events.
+		publisher := webhooks.NewPublisher(d.Pool)
+
 		// Wallet-group handler needs all four extra deps. Missing any
 		// disables the endpoint — server still boots.
 		if d.CrossMint != nil && d.Tempo != nil && d.Keystore != nil {
 			s.wgHandlers = handlers.NewWalletGroups(
-				d.Pool, d.CrossMint, d.Tempo, d.Keystore, limitsSvc,
+				d.Pool, d.CrossMint, d.Tempo, d.Keystore, limitsSvc, publisher,
 			)
 		}
 
@@ -113,7 +118,7 @@ func New(d Deps) *Server {
 		// wallet inside a group.
 		if d.Keystore != nil {
 			skSvc := sessionkey.New(d.Pool, d.Keystore)
-			s.sessionKeyHandlers = handlers.NewSessionKeys(d.Pool, skSvc)
+			s.sessionKeyHandlers = handlers.NewSessionKeys(d.Pool, skSvc, publisher)
 		}
 
 		// Webhook endpoint CRUD. No external deps — just the pool.

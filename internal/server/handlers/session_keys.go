@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,17 +15,28 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	"github.com/atara-xyz/atara-pay/internal/sessionkey"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 )
 
 // SessionKeys handles /v1/wallet-groups/:id/session-keys endpoints.
 type SessionKeys struct {
-	pool *pgxpool.Pool
-	q    *sqlcgen.Queries
-	svc  *sessionkey.Service
+	pool      *pgxpool.Pool
+	q         *sqlcgen.Queries
+	svc       *sessionkey.Service
+	publisher *webhooks.Publisher // optional
 }
 
-func NewSessionKeys(pool *pgxpool.Pool, svc *sessionkey.Service) *SessionKeys {
-	return &SessionKeys{pool: pool, q: sqlcgen.New(pool), svc: svc}
+func NewSessionKeys(pool *pgxpool.Pool, svc *sessionkey.Service, pub *webhooks.Publisher) *SessionKeys {
+	return &SessionKeys{pool: pool, q: sqlcgen.New(pool), svc: svc, publisher: pub}
+}
+
+func (h *SessionKeys) publish(
+	ctx context.Context, tenantID, eventType string, data any, refs webhooks.ResourceRefs,
+) {
+	if h.publisher == nil {
+		return
+	}
+	_, _ = h.publisher.Publish(ctx, tenantID, eventType, data, refs)
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -192,6 +204,12 @@ func (h *SessionKeys) Create(c *fiber.Ctx) error {
 	}
 
 	view := toSessionKeyView(row)
+	h.publish(ctx, tenantID, webhooks.EventSessionKeyCreated, view,
+		webhooks.ResourceRefs{
+			WalletID:     wallet.ID,
+			GroupID:      group.ID,
+			SessionKeyID: row.ID,
+		})
 	return c.Status(fiber.StatusCreated).JSON(CreateSessionKeyResponse{
 		SessionKeyView: view,
 		PrivateKey:     hex.EncodeToString(minted.PrivateKey),
@@ -317,7 +335,14 @@ func (h *SessionKeys) Revoke(c *fiber.Ctx) error {
 	if err != nil {
 		return internalError(c, err)
 	}
-	return c.JSON(toSessionKeyView(row))
+	view := toSessionKeyView(row)
+	h.publish(ctx, tenantID, webhooks.EventSessionKeyRevoked, view,
+		webhooks.ResourceRefs{
+			WalletID:     row.WalletID,
+			GroupID:      row.GroupID,
+			SessionKeyID: row.ID,
+		})
+	return c.JSON(view)
 }
 
 // ──────────────────────────────────────────────────────────────────────

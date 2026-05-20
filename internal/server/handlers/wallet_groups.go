@@ -17,6 +17,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/limits"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 )
 
 // WalletGroups handles the dual-rail-by-default endpoints.
@@ -28,7 +29,8 @@ type WalletGroups struct {
 	crossmint *crossmint.Adapter
 	tempo     *tempo.Adapter
 	ks        keystore.Keystore
-	limits    *limits.Service // optional — nil disables limit enforcement
+	limits    *limits.Service     // optional — nil disables limit enforcement
+	publisher *webhooks.Publisher // optional — nil disables webhook emit
 
 	// crossMintChainDefault names the CrossMint chain new wallets default
 	// to when the request body omits "chain". "base" is cheap, fast, and
@@ -36,15 +38,16 @@ type WalletGroups struct {
 	crossMintChainDefault string
 }
 
-// NewWalletGroups wires the handler set. cm/tp/ks are required; limits is
-// optional during the rollout window (passing nil disables limit
-// enforcement — useful while the customer hasn't created a policy yet).
+// NewWalletGroups wires the handler set. cm/tp/ks are required; limits and
+// publisher are optional — passing nil for either disables enforcement /
+// outbound events without breaking the rest of the surface.
 func NewWalletGroups(
 	pool *pgxpool.Pool,
 	cm *crossmint.Adapter,
 	tp *tempo.Adapter,
 	ks keystore.Keystore,
 	limitsSvc *limits.Service,
+	pub *webhooks.Publisher,
 ) *WalletGroups {
 	return &WalletGroups{
 		pool:                  pool,
@@ -53,8 +56,24 @@ func NewWalletGroups(
 		tempo:                 tp,
 		ks:                    ks,
 		limits:                limitsSvc,
+		publisher:             pub,
 		crossMintChainDefault: "base",
 	}
+}
+
+// publish is a fire-and-forget helper that swallows publisher errors so a
+// downstream webhook failure never fails the caller's domain operation. A
+// later observability sprint can pipe these through a structured logger.
+func (h *WalletGroups) publish(
+	ctx context.Context,
+	tenantID, eventType string,
+	data any,
+	refs webhooks.ResourceRefs,
+) {
+	if h.publisher == nil {
+		return
+	}
+	_, _ = h.publisher.Publish(ctx, tenantID, eventType, data, refs)
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -261,6 +280,8 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 	}
 
 	view := toGroupView(group, []sqlcgen.Wallet{cmRow, tpRow})
+	h.publish(ctx, tenantID, webhooks.EventWalletGroupCreated, view,
+		webhooks.ResourceRefs{GroupID: group.ID})
 	return c.Status(fiber.StatusCreated).JSON(view)
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/id"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 )
 
 // CreateOnrampRequest is the JSON body of POST /v1/wallet-groups/:id/onramp.
@@ -119,7 +120,19 @@ func (h *WalletGroups) CreateOnramp(c *fiber.Ctx) error {
 			"persist_error":     err.Error(),
 		})
 	}
-	return c.Status(fiber.StatusCreated).JSON(toOnrampView(row))
+	view := toOnrampView(row)
+	// We emit on order CREATION (not completion) — the CrossMint callback
+	// loop that drives the order to "completed" is wired in a later
+	// sprint. Customers still find this useful: they get a webhook the
+	// moment the hosted-checkout URL is live, can email it to the user,
+	// etc.
+	h.publish(ctx, tenantID, "onramp.created", view,
+		webhooks.ResourceRefs{
+			WalletID:      wallet.ID,
+			GroupID:       group.ID,
+			OnrampOrderID: row.ID,
+		})
+	return c.Status(fiber.StatusCreated).JSON(view)
 }
 
 // ──────────────────────────────────────────────────────────────────────

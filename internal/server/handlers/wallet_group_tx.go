@@ -14,6 +14,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/limits"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 )
 
 // SendTransactionRequest is the JSON body of POST /v1/wallet-groups/:id/transactions.
@@ -200,7 +201,30 @@ func (h *WalletGroups) SendTransaction(c *fiber.Ctx) error {
 			"persist_error": err.Error(),
 		})
 	}
-	return c.Status(fiber.StatusCreated).JSON(toTxView(txRow))
+	view := toTxView(txRow)
+	h.publish(ctx, tenantID, eventTypeForTxStatus(txRow.Status), view,
+		webhooks.ResourceRefs{
+			WalletID:      wallet.ID,
+			GroupID:       group.ID,
+			TransactionID: txRow.ID,
+			SessionKeyID:  signerID,
+		})
+	return c.Status(fiber.StatusCreated).JSON(view)
+}
+
+// eventTypeForTxStatus maps the transactions.status string to the matching
+// webhook event constant. "succeeded" → transaction.succeeded; anything
+// else (failed/cancelled) → transaction.failed. "pending" still emits
+// "succeeded" because the rail acknowledged it — the subsequent
+// confirmation flip will not re-emit (M7 receipt poller is the right place
+// for that signal).
+func eventTypeForTxStatus(status string) string {
+	switch status {
+	case "succeeded", "pending", "broadcast":
+		return webhooks.EventTransactionSucceeded
+	default:
+		return webhooks.EventTransactionFailed
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────
