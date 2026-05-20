@@ -6,7 +6,9 @@ require (
 	github.com/ethereum/go-ethereum v1.17.3
 	github.com/gofiber/fiber/v2 v2.52.13
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/redis/go-redis/v9 v9.19.0
+	golang.org/x/crypto v0.51.0
 )
 
 require (
@@ -47,7 +49,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
