@@ -28,11 +28,7 @@ sql:
 
         # Map NUMERIC(38, 18) to a string so we never lose precision in Go.
         # All Atara amount math goes through math/big or shopspring/decimal.
+        # (BYTEA is left at sqlc's default []byte — no override needed.)
         overrides:
           - db_type: "numeric"
             go_type: "string"
-          - db_type: "bytea"
-            go_type:
-              import: "[]byte"
-              type:   "byte"
-              slice:  true
