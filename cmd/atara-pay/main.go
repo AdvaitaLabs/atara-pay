@@ -14,6 +14,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/keystore"
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server"
+	"github.com/atara-xyz/atara-pay/internal/sessionkey"
 	"github.com/atara-xyz/atara-pay/internal/types"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -157,6 +158,15 @@ func main() {
 		Keystore:          ksIface,
 		Redis:             rdb,
 	})
+
+	// Session-key background rotator. Sweeps expired rows + logs rotation
+	// backlog every minute. Webhook handoff lands in M7.
+	if pool != nil {
+		rotatorCtx, cancelRotator := context.WithCancel(ctx)
+		defer cancelRotator()
+		rotator := sessionkey.NewRotator(pool, 0, 0)
+		go rotator.Run(rotatorCtx)
+	}
 
 	addr := ":" + cfg.Port
 	log.Printf("[atara-pay] listening on %s (default rail: %s)", addr, cfg.DefaultRail)

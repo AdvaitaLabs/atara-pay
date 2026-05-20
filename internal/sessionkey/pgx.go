@@ -33,6 +33,13 @@ func pgxRequiredTimestamp(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
+// pgxTickTimestamp is the rotator's "now" cutoff parameter. Same shape as
+// pgxRequiredTimestamp; named separately so the call site reads as a
+// boundary timestamp, not a record field.
+func pgxTickTimestamp(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
+}
+
 // pgxIntUSD wraps a whole-USD int64 into a Valid pgtype.Numeric at exp=0.
 // Mirror of limits.ToNumeric, kept local to avoid the import.
 func pgxIntUSD(v int64) pgtype.Numeric {
