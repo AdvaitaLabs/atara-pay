@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -24,6 +25,16 @@ type SendTransactionRequest struct {
 	// Rail optionally overrides the asset → rail mapping. Accepted values
 	// match the wallets.rail column ("crossmint" | "tempo").
 	Rail string `json:"rail,omitempty"`
+
+	// SignerID identifies the session key authorizing this transfer. When
+	// non-empty:
+	//   - the limit check resolves to the session key's dedicated policy
+	//     (most-specific scope wins; M4.2 policy resolution)
+	//   - the audit row records session_key_id for traceability
+	//   - the on-chain signature is STILL the wallet's master key (M5.4
+	//     is gateway-enforced only; on-chain authorizeKey lands in M5.6
+	//     once Sponsored Transactions handle gas)
+	SignerID string `json:"signer_id,omitempty"`
 }
 
 // TransactionView is the safe-to-return projection of a transactions row.
@@ -99,18 +110,49 @@ func (h *WalletGroups) SendTransaction(c *fiber.Ctx) error {
 		})
 	}
 
+	// Resolve the (optional) session key. Three guards apply:
+	//   - cross-tenant: another tenant's id must not pass
+	//   - status:       only "active" session keys may authorize
+	//   - wallet match: the session key must belong to the wallet we
+	//                   resolved on this rail (a key minted on the Tempo
+	//                   wallet can't authorize a CrossMint transfer)
+	// Any failure returns 403 Forbidden — same body whether the key
+	// doesn't exist, is revoked, or belongs to another wallet.
+	var signerID string
+	if req.SignerID != "" {
+		sk, lerr := h.q.GetSessionKeyByID(ctx, req.SignerID)
+		if lerr != nil || sk.TenantID != tenantID || sk.WalletID != wallet.ID ||
+			sk.Status != "active" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "signer_id is not a valid active session key for this wallet",
+			})
+		}
+		if sk.ExpiresAt.Valid && !sk.ExpiresAt.Time.IsZero() &&
+			time.Now().UTC().After(sk.ExpiresAt.Time) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "session key expired",
+			})
+		}
+		signerID = sk.ID
+	}
+
 	// Limit gate. Runs BEFORE the rail call so a denied attempt never
 	// charges upstream. The limits service writes the violation row
 	// internally on deny; we surface a 429 with the violation details so
 	// the customer can react. limits.Check returns Allowed=true when no
 	// policy applies (e.g. a tenant that disabled their default policy).
+	//
+	// When SessionKeyID is non-empty, policy resolution prefers the
+	// session-key-scoped policy over the wallet / group / tenant
+	// defaults — see limits.resolvePolicy.
 	if h.limits != nil {
 		decision, derr := h.limits.Check(ctx, limits.CheckRequest{
-			TenantID:  tenantID,
-			WalletID:  wallet.ID,
-			Amount:    req.Amount,
-			Asset:     req.Asset,
-			Recipient: req.To,
+			TenantID:     tenantID,
+			WalletID:     wallet.ID,
+			SessionKeyID: signerID,
+			Amount:       req.Amount,
+			Asset:        req.Asset,
+			Recipient:    req.To,
 		})
 		if derr != nil {
 			return internalError(c, derr)
@@ -144,7 +186,7 @@ func (h *WalletGroups) SendTransaction(c *fiber.Ctx) error {
 	}
 
 	// Persist the audit row.
-	txRow, err := h.recordTransaction(ctx, tenantID, middleware.APIKeyID(c), group, wallet, req, txArtifact)
+	txRow, err := h.recordTransaction(ctx, tenantID, middleware.APIKeyID(c), signerID, group, wallet, req, txArtifact)
 	if err != nil {
 		// Rail charged but we couldn't record. Log loudly via the response
 		// rather than swallow — better to fail visible than have invisible
@@ -209,7 +251,7 @@ func (h *WalletGroups) sendViaTempo(
 
 func (h *WalletGroups) recordTransaction(
 	ctx context.Context,
-	tenantID, apiKeyID string,
+	tenantID, apiKeyID, sessionKeyID string,
 	g sqlcgen.WalletGroup,
 	w sqlcgen.Wallet,
 	req SendTransactionRequest,
@@ -229,6 +271,7 @@ func (h *WalletGroups) recordTransaction(
 		Status:            string(artifact.Status),
 		TxHash:            pgxText(artifact.TxHash),
 		ProviderTxID:      pgxText(artifact.ID),
+		SessionKeyID:      pgxText(sessionKeyID),
 		InitiatedByApikey: pgxText(apiKeyID),
 		IdempotencyKey:    pgxText(req.IdempotencyKey),
 		Metadata:          []byte("{}"),
