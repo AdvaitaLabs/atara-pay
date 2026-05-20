@@ -15,6 +15,9 @@ type Querier interface {
 	// requests (Bearer sk_test_… / sk_live_…). The raw secret is shown to the
 	// user exactly once at creation; from then on we look up by SHA-256 hash.
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
+	// Fiat → crypto purchases. The provider's hosted checkout URL is captured
+	// at creation; status advances via webhook updates from the provider.
+	CreateOnrampOrder(ctx context.Context, arg CreateOnrampOrderParams) (OnrampOrder, error)
 	// Tenants are ATARA-Pay's primary isolation unit.
 	// Queries here are used by signup, billing, and the customer self-service
 	// account page.
@@ -35,6 +38,8 @@ type Querier interface {
 	// Returns the key only if it has not been revoked.
 	GetAPIKeyByHash(ctx context.Context, keyHash []byte) (ApiKey, error)
 	GetAPIKeyByID(ctx context.Context, id string) (ApiKey, error)
+	GetOnrampOrderByID(ctx context.Context, id string) (OnrampOrder, error)
+	GetOnrampOrderByProviderID(ctx context.Context, arg GetOnrampOrderByProviderIDParams) (OnrampOrder, error)
 	GetTenantByEmail(ctx context.Context, primaryEmail string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id string) (Tenant, error)
 	GetTransactionByID(ctx context.Context, id string) (Transaction, error)
@@ -68,6 +73,8 @@ type Querier interface {
 	// All agent groups belonging to a particular user group (parent → child).
 	// Used by the dashboard to show "Alice's agents" under Alice's user group.
 	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
+	ListOnrampOrdersByGroup(ctx context.Context, arg ListOnrampOrdersByGroupParams) ([]OnrampOrder, error)
+	ListOnrampOrdersByTenant(ctx context.Context, arg ListOnrampOrdersByTenantParams) ([]OnrampOrder, error)
 	ListTransactionsByGroup(ctx context.Context, arg ListTransactionsByGroupParams) ([]Transaction, error)
 	ListTransactionsByTenant(ctx context.Context, arg ListTransactionsByTenantParams) ([]Transaction, error)
 	ListTransactionsByWallet(ctx context.Context, arg ListTransactionsByWalletParams) ([]Transaction, error)
@@ -87,6 +94,7 @@ type Querier interface {
 	SoftDeleteWalletGroup(ctx context.Context, id string) error
 	TouchAPIKeyUsage(ctx context.Context, id string) error
 	TouchUserLogin(ctx context.Context, id string) error
+	UpdateOnrampOrderStatus(ctx context.Context, arg UpdateOnrampOrderStatusParams) (OnrampOrder, error)
 	UpdateTenantPlan(ctx context.Context, arg UpdateTenantPlanParams) (Tenant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
 	UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) (Transaction, error)
