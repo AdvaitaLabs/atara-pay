@@ -14,6 +14,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/db/sqlcgen"
 	"github.com/atara-xyz/atara-pay/internal/id"
 	"github.com/atara-xyz/atara-pay/internal/keystore"
+	"github.com/atara-xyz/atara-pay/internal/limits"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
 )
@@ -27,6 +28,7 @@ type WalletGroups struct {
 	crossmint *crossmint.Adapter
 	tempo     *tempo.Adapter
 	ks        keystore.Keystore
+	limits    *limits.Service // optional — nil disables limit enforcement
 
 	// crossMintChainDefault names the CrossMint chain new wallets default
 	// to when the request body omits "chain". "base" is cheap, fast, and
@@ -34,13 +36,15 @@ type WalletGroups struct {
 	crossMintChainDefault string
 }
 
-// NewWalletGroups wires the handler set. All five dependencies are required
-// — the endpoint refuses to mount when any is missing (see server.New).
+// NewWalletGroups wires the handler set. cm/tp/ks are required; limits is
+// optional during the rollout window (passing nil disables limit
+// enforcement — useful while the customer hasn't created a policy yet).
 func NewWalletGroups(
 	pool *pgxpool.Pool,
 	cm *crossmint.Adapter,
 	tp *tempo.Adapter,
 	ks keystore.Keystore,
+	limitsSvc *limits.Service,
 ) *WalletGroups {
 	return &WalletGroups{
 		pool:                  pool,
@@ -48,6 +52,7 @@ func NewWalletGroups(
 		crossmint:             cm,
 		tempo:                 tp,
 		ks:                    ks,
+		limits:                limitsSvc,
 		crossMintChainDefault: "base",
 	}
 }

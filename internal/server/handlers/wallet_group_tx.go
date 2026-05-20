@@ -10,6 +10,7 @@ import (
 
 	"github.com/atara-xyz/atara-pay/internal/db/sqlcgen"
 	"github.com/atara-xyz/atara-pay/internal/id"
+	"github.com/atara-xyz/atara-pay/internal/limits"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	apitypes "github.com/atara-xyz/atara-pay/internal/types"
 )
@@ -96,6 +97,31 @@ func (h *WalletGroups) SendTransaction(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": fmt.Sprintf("group has no active %s wallet", rail),
 		})
+	}
+
+	// Limit gate. Runs BEFORE the rail call so a denied attempt never
+	// charges upstream. The limits service writes the violation row
+	// internally on deny; we surface a 429 with the violation details so
+	// the customer can react. limits.Check returns Allowed=true when no
+	// policy applies (e.g. a tenant that disabled their default policy).
+	if h.limits != nil {
+		decision, derr := h.limits.Check(ctx, limits.CheckRequest{
+			TenantID:  tenantID,
+			WalletID:  wallet.ID,
+			Amount:    req.Amount,
+			Asset:     req.Asset,
+			Recipient: req.To,
+		})
+		if derr != nil {
+			return internalError(c, derr)
+		}
+		if !decision.Allowed {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":     "spending limit exceeded",
+				"violation": decision.Violation,
+				"policy_id": decision.PolicyID,
+			})
+		}
 	}
 
 	// Dispatch.

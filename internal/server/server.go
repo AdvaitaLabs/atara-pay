@@ -21,11 +21,13 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/atara-xyz/atara-pay/internal/adapters/crossmint"
 	"github.com/atara-xyz/atara-pay/internal/adapters/tempo"
 	paygwerr "github.com/atara-xyz/atara-pay/internal/errors"
 	"github.com/atara-xyz/atara-pay/internal/keystore"
+	"github.com/atara-xyz/atara-pay/internal/limits"
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server/handlers"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
@@ -44,6 +46,11 @@ type Deps struct {
 	CrossMint *crossmint.Adapter
 	Tempo     *tempo.Adapter
 	Keystore  keystore.Keystore
+
+	// Optional. Redis powers the limits.Service period accumulators
+	// (daily / weekly / monthly). Nil falls back to the synchronous gates
+	// only — per-tx + recipient + expiry still enforce.
+	Redis *redis.Client
 }
 
 // Server is the HTTP entry point.
@@ -83,10 +90,18 @@ func New(d Deps) *Server {
 		s.queries = handlers.NewQueriesForMiddleware(d.Pool)
 		s.limitsHandlers = handlers.NewLimits(d.Pool)
 
+		// Build the limits.Service the wallet-group transaction handler
+		// consults on every transfer. Redis is optional — d.Redis nil means
+		// "synchronous gates only" (per-tx, recipient, expiry); the period
+		// accumulators no-op until Redis is wired by a later sprint.
+		limitsSvc := limits.New(handlers.NewQueriesForMiddleware(d.Pool), d.Redis)
+
 		// Wallet-group handler needs all four extra deps. Missing any
 		// disables the endpoint — server still boots.
 		if d.CrossMint != nil && d.Tempo != nil && d.Keystore != nil {
-			s.wgHandlers = handlers.NewWalletGroups(d.Pool, d.CrossMint, d.Tempo, d.Keystore)
+			s.wgHandlers = handlers.NewWalletGroups(
+				d.Pool, d.CrossMint, d.Tempo, d.Keystore, limitsSvc,
+			)
 		}
 	}
 

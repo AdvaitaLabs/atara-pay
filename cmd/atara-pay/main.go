@@ -41,17 +41,19 @@ func main() {
 		log.Println("[atara-pay] DATABASE_URL not set — auth routes disabled (memory-only mode)")
 	}
 
-	// ── Redis (still optional; consumed in M6 limits) ────────────────
+	// ── Redis (powers limits.Service period accumulators) ───────────
+	var rdb *cache.Client
 	if cfg.RedisURL != "" {
-		rdb, err := cache.Connect(ctx, cache.Config{URL: cfg.RedisURL})
+		var err error
+		rdb, err = cache.Connect(ctx, cache.Config{URL: cfg.RedisURL})
 		if err != nil {
 			log.Fatalf("redis: %v", err)
 		}
 		defer rdb.Close()
 		log.Println("[atara-pay] redis connected")
-		_ = rdb // wired into limit middleware in M6
 	} else {
-		log.Println("[atara-pay] REDIS_URL not set — limit counters will use in-memory fallback")
+		log.Println("[atara-pay] REDIS_URL not set — period accumulators disabled, " +
+			"synchronous limit gates (per-tx / recipient / expiry) still enforce")
 	}
 
 	// ── Session signing key ──────────────────────────────────────────
@@ -153,6 +155,7 @@ func main() {
 		CrossMint:         cmAdapter,
 		Tempo:             tpAdapter,
 		Keystore:          ksIface,
+		Redis:             rdb,
 	})
 
 	addr := ":" + cfg.Port
