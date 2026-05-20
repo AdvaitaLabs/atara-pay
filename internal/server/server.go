@@ -94,15 +94,21 @@ func New(d Deps) *Server {
 		s.queries = handlers.NewQueriesForMiddleware(d.Pool)
 		s.limitsHandlers = handlers.NewLimits(d.Pool)
 
+		// Outbound webhook publisher. Shared by every handler that emits
+		// domain events (and the limits service for limit.exceeded).
+		publisher := webhooks.NewPublisher(d.Pool)
+
 		// Build the limits.Service the wallet-group transaction handler
 		// consults on every transfer. Redis is optional — d.Redis nil means
 		// "synchronous gates only" (per-tx, recipient, expiry); the period
 		// accumulators no-op until Redis is wired by a later sprint.
-		limitsSvc := limits.New(handlers.NewQueriesForMiddleware(d.Pool), d.Redis)
-
-		// Outbound webhook publisher. Shared by every handler that emits
-		// domain events.
-		publisher := webhooks.NewPublisher(d.Pool)
+		// The publisher doubles as the ViolationEmitter so a denied
+		// transfer fans out a limit.exceeded webhook in the same call.
+		limitsSvc := limits.New(
+			handlers.NewQueriesForMiddleware(d.Pool),
+			d.Redis,
+			webhooks.NewLimitEmitter(publisher),
+		)
 
 		// Wallet-group handler needs all four extra deps. Missing any
 		// disables the endpoint — server still boots.

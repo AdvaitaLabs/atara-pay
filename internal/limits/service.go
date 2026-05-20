@@ -48,14 +48,30 @@ type Querier interface {
 
 // Service is concurrency-safe. Construct once and share across handlers.
 type Service struct {
-	q     Querier
-	redis *redis.Client // optional; nil disables period accumulators
+	q       Querier
+	redis   *redis.Client // optional; nil disables period accumulators
+	emitter ViolationEmitter
+}
+
+// ViolationEmitter is what the Service uses to fan out a limit.exceeded
+// event to subscribed webhooks. Decoupled via an interface so the limits
+// package doesn't import internal/webhooks (which would close a cycle
+// once webhooks needs limits one day).
+//
+// The implementation is webhooks.Publisher in production; tests pass a
+// stub.
+type ViolationEmitter interface {
+	EmitLimitExceeded(
+		ctx context.Context,
+		tenantID, policyID, violationType, walletID, sessionKeyID, attemptedAmount, asset, recipient string,
+	)
 }
 
 // New builds a Service. Pass nil for redis to fall back to "per-tx and
 // recipient gates only" — useful during the migration to Redis or in tests.
-func New(q Querier, rdb *redis.Client) *Service {
-	return &Service{q: q, redis: rdb}
+// emitter is optional; nil disables outbound limit.exceeded events.
+func New(q Querier, rdb *redis.Client, emitter ViolationEmitter) *Service {
+	return &Service{q: q, redis: rdb, emitter: emitter}
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -344,6 +360,19 @@ func (s *Service) reject(
 		AttemptedRecipient: pgxTextOpt(req.Recipient),
 		Metadata:           []byte("{}"),
 	})
+
+	// Fan out to webhooks (also best-effort). Done after the audit write so
+	// the violation row is queryable from the moment the customer's
+	// receiver gets the event.
+	if s.emitter != nil {
+		s.emitter.EmitLimitExceeded(
+			ctx,
+			req.TenantID, pol.ID, violationType,
+			req.WalletID, req.SessionKeyID,
+			req.Amount, req.Asset, req.Recipient,
+		)
+	}
+
 	return &CheckResult{
 		Allowed:  false,
 		PolicyID: pol.ID,

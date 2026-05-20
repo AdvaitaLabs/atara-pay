@@ -78,7 +78,7 @@ func mkPolicy(id, tenantID string) sqlcgen.LimitPolicy {
 // ──────────────────────────────────────────────────────────────────────
 
 func TestNoPolicyAllowsEverything(t *testing.T) {
-	svc := New(&fakeQ{}, nil)
+	svc := New(&fakeQ{}, nil, nil)
 	res, err := svc.Check(context.Background(), CheckRequest{
 		TenantID: "tn_x", Amount: "1000000", Asset: "USDC",
 	})
@@ -93,7 +93,7 @@ func TestNoPolicyAllowsEverything(t *testing.T) {
 func TestDisabledPolicyTreatedAsAbsent(t *testing.T) {
 	p := mkPolicy("pol_1", "tn_x")
 	p.Enabled = false
-	svc := New(&fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}, nil)
+	svc := New(&fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}, nil, nil)
 	res, _ := svc.Check(context.Background(), CheckRequest{TenantID: "tn_x", Amount: "10"})
 	if !res.Allowed {
 		t.Errorf("disabled policy must not block")
@@ -104,7 +104,7 @@ func TestExpiredPolicyBlocks(t *testing.T) {
 	p := mkPolicy("pol_1", "tn_x")
 	p.ExpiresAt = pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true}
 	q := &fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}
-	svc := New(q, nil)
+	svc := New(q, nil, nil)
 	res, _ := svc.Check(context.Background(), CheckRequest{TenantID: "tn_x", Amount: "1"})
 	if res.Allowed {
 		t.Errorf("expired policy must block")
@@ -122,7 +122,7 @@ func TestPerTxCap(t *testing.T) {
 	p.PerTxAmount = mkNumeric(5, 0) // exactly 5
 
 	q := &fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}
-	svc := New(q, nil)
+	svc := New(q, nil, nil)
 
 	// Under cap: allowed.
 	if res, _ := svc.Check(context.Background(), CheckRequest{
@@ -148,7 +148,7 @@ func TestAllowlistMode(t *testing.T) {
 	p.AllowedRecipients = []byte(`["merchant:openai","merchant:prakasa"]`)
 
 	q := &fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}
-	svc := New(q, nil)
+	svc := New(q, nil, nil)
 
 	if r, _ := svc.Check(context.Background(), CheckRequest{
 		TenantID: "tn_x", Amount: "1", Recipient: "merchant:openai",
@@ -168,7 +168,7 @@ func TestDenylistMode(t *testing.T) {
 	p.DeniedRecipients = []byte(`["0xBAD"]`)
 
 	q := &fakeQ{tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": p}}
-	svc := New(q, nil)
+	svc := New(q, nil, nil)
 
 	if r, _ := svc.Check(context.Background(), CheckRequest{
 		TenantID: "tn_x", Amount: "1", Recipient: "0xGOOD",
@@ -192,7 +192,7 @@ func TestPolicyResolutionPrefersMostSpecific(t *testing.T) {
 		tenantDefault: map[string]sqlcgen.LimitPolicy{"tn_x": tenantPol},
 		policyByScope: map[string]sqlcgen.LimitPolicy{"wallet:wlt_a": walletPol},
 	}
-	svc := New(q, nil)
+	svc := New(q, nil, nil)
 
 	// Without WalletID set, only tenant_default applies — no cap, big amount OK.
 	if r, _ := svc.Check(context.Background(), CheckRequest{
