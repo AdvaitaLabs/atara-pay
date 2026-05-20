@@ -1,0 +1,38 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    # Schema source — point at the .up.sql migrations only. Order matters
+    # because earlier files create the objects later files reference.
+    schema:
+      - "internal/db/migrations/000001_tenants_and_auth.up.sql"
+      - "internal/db/migrations/000002_wallet_groups_and_wallets.up.sql"
+      - "internal/db/migrations/000003_transactions_and_onramp.up.sql"
+      - "internal/db/migrations/000004_session_keys_and_limits.up.sql"
+      - "internal/db/migrations/000005_webhooks.up.sql"
+
+    queries: "internal/db/queries"
+
+    gen:
+      go:
+        package: "sqlcgen"
+        out:     "internal/db/sqlcgen"
+        sql_package: "pgx/v5"
+
+        # Keep generated code tidy.
+        emit_json_tags:       true
+        emit_db_tags:         false
+        emit_interface:       true     # Querier interface for mocking
+        emit_exact_table_names: false
+        emit_empty_slices:    true
+        emit_prepared_queries: false
+
+        # Map NUMERIC(38, 18) to a string so we never lose precision in Go.
+        # All Atara amount math goes through math/big or shopspring/decimal.
+        overrides:
+          - db_type: "numeric"
+            go_type: "string"
+          - db_type: "bytea"
+            go_type:
+              import: "[]byte"
+              type:   "byte"
+              slice:  true
