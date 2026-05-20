@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,14 +22,24 @@ import (
 // Auth wires the signup/login/api-key handlers to their dependencies.
 // Construct one per process and mount its methods on the router.
 type Auth struct {
-	pool *pgxpool.Pool
-	q    *sqlcgen.Queries
+	pool          *pgxpool.Pool
+	q             *sqlcgen.Queries
+	sessionSecret []byte
+	sessionTTL    time.Duration
 }
 
-// NewAuth builds the handler set. Pass the pgxpool so we can open
-// transactions; pass the Querier for read-only lookups.
-func NewAuth(pool *pgxpool.Pool) *Auth {
-	return &Auth{pool: pool, q: sqlcgen.New(pool)}
+// NewAuth builds the handler set. sessionSecret must be at least 32 bytes
+// (see auth.NewSessionToken). sessionTTL=0 falls back to 24h.
+func NewAuth(pool *pgxpool.Pool, sessionSecret []byte, sessionTTL time.Duration) *Auth {
+	if sessionTTL <= 0 {
+		sessionTTL = 24 * time.Hour
+	}
+	return &Auth{
+		pool:          pool,
+		q:             sqlcgen.New(pool),
+		sessionSecret: sessionSecret,
+		sessionTTL:    sessionTTL,
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -201,6 +212,81 @@ func (h *Auth) Signup(c *fiber.Ctx) error {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Login
+// ──────────────────────────────────────────────────────────────────────
+
+// LoginRequest is the JSON body of POST /login.
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// LoginResponse is what a successful POST /login returns. The session_token
+// is an HS256 JWT — clients send it back as Authorization: Bearer for the
+// dashboard's authenticated routes.
+type LoginResponse struct {
+	SessionToken string   `json:"session_token"`
+	ExpiresAt    int64    `json:"expires_at"`
+	User         userView `json:"user"`
+	TenantID     string   `json:"tenant_id"`
+}
+
+// Login authenticates by email + password. On success it mints a session
+// JWT and updates last_login_at. On failure it returns a generic 401 — we
+// never differentiate "wrong email" from "wrong password" to avoid leaking
+// which emails are registered.
+func (h *Auth) Login(c *fiber.Ctx) error {
+	var req LoginRequest
+	if err := c.BodyParser(&req); err != nil {
+		return badRequest(c, "invalid JSON body")
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.Email == "" || req.Password == "" {
+		return loginRejected(c)
+	}
+
+	// Look up by email. We use GetUserByEmail (across tenants) and pick the
+	// first hit, since email is unique per tenant but not globally. If the
+	// same email exists at multiple tenants, a follow-up endpoint can ask
+	// the user which one to log into; for MVP we take the earliest signup.
+	users, err := h.q.GetUserByEmail(c.UserContext(), req.Email)
+	if err != nil || len(users) == 0 {
+		// Hash a dummy password anyway so timing doesn't reveal whether
+		// the email exists. argon2 dominates the request latency.
+		_, _ = auth.HashPassword("dummy-to-equalize-timing")
+		return loginRejected(c)
+	}
+	user := users[0]
+
+	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
+		return loginRejected(c)
+	}
+
+	tok, err := auth.NewSessionToken(
+		h.sessionSecret, user.ID, user.TenantID, user.Role, h.sessionTTL,
+	)
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	// Fire-and-forget login timestamp update — never blocks the login.
+	go func(id string) {
+		_ = h.q.TouchUserLogin(context.Background(), id)
+	}(user.ID)
+
+	return c.JSON(LoginResponse{
+		SessionToken: tok,
+		ExpiresAt:    time.Now().Add(h.sessionTTL).Unix(),
+		User: userView{
+			ID:    user.ID,
+			Email: user.Email,
+			Role:  user.Role,
+		},
+		TenantID: user.TenantID,
+	})
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // helpers
 // ──────────────────────────────────────────────────────────────────────
 
@@ -234,6 +320,14 @@ func isUniqueViolation(err error) bool {
 
 func badRequest(c *fiber.Ctx, msg string) error {
 	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": msg})
+}
+
+// loginRejected is the single 401 path used by Login. The body and timing
+// must look identical regardless of whether the email or password was wrong.
+func loginRejected(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		"error": "invalid email or password",
+	})
 }
 
 func conflict(c *fiber.Ctx, msg string) error {

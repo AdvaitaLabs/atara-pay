@@ -15,6 +15,10 @@ type Config struct {
 	DatabaseURL string // postgres://...
 	RedisURL    string // redis://...
 
+	// SessionSigningKey is the HS256 secret used to mint dashboard session
+	// JWTs. Must be at least 32 bytes — see internal/auth/session.go.
+	SessionSigningKey []byte
+
 	// CrossMint
 	CrossMintAPIKey  string
 	CrossMintBaseURL string
@@ -36,15 +40,16 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:             getEnv("ATARA_PAY_PORT", "8080"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		RedisURL:         os.Getenv("REDIS_URL"),
-		CrossMintAPIKey:  os.Getenv("CROSSMINT_API_KEY"),
-		CrossMintBaseURL: os.Getenv("CROSSMINT_BASE_URL"),
-		TempoRPCURL:      os.Getenv("TEMPO_RPC_URL"),
-		TempoChainID:     chainID,
-		DefaultRail:      getEnv("ATARA_PAY_DEFAULT_RAIL", "crossmint"),
-		RoutingMode:      getEnv("ATARA_PAY_ROUTING_MODE", "smart"),
+		Port:              getEnv("ATARA_PAY_PORT", "8080"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		RedisURL:          os.Getenv("REDIS_URL"),
+		SessionSigningKey: []byte(os.Getenv("SESSION_SIGNING_KEY")),
+		CrossMintAPIKey:   os.Getenv("CROSSMINT_API_KEY"),
+		CrossMintBaseURL:  os.Getenv("CROSSMINT_BASE_URL"),
+		TempoRPCURL:       os.Getenv("TEMPO_RPC_URL"),
+		TempoChainID:      chainID,
+		DefaultRail:       getEnv("ATARA_PAY_DEFAULT_RAIL", "crossmint"),
+		RoutingMode:       getEnv("ATARA_PAY_ROUTING_MODE", "smart"),
 	}
 
 	if cfg.CrossMintAPIKey == "" && cfg.TempoRPCURL == "" {
