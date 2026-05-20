@@ -17,6 +17,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/auth"
 	"github.com/atara-xyz/atara-pay/internal/db/sqlcgen"
 	"github.com/atara-xyz/atara-pay/internal/id"
+	"github.com/atara-xyz/atara-pay/internal/limits"
 )
 
 // Auth wires the signup/login/api-key handlers to their dependencies.
@@ -186,6 +187,33 @@ func (h *Auth) Signup(c *fiber.Ctx) error {
 		Environment: "live",
 		KeyPrefix:   livePrefix,
 		KeyHash:     liveHash,
+	})
+	if err != nil {
+		return internalError(c, err)
+	}
+
+	// Default tenant_default policy at the Conservative tier. Customers
+	// upgrade tiers later via the /v1/tenants/:id/limits endpoint (M4.4);
+	// every brand-new tenant starts safe.
+	tier := limits.TierConservative
+	_, err = qtx.CreateLimitPolicy(c.UserContext(), sqlcgen.CreateLimitPolicyParams{
+		ID:                id.New(id.PrefixLimitPolicy),
+		TenantID:          tenant.ID,
+		ScopeType:         "tenant_default",
+		ScopeID:           pgxText(""), // tenant_default leaves scope_id NULL
+		PerTxAmount:       limits.ToNumeric(tier.PerTxUSD),
+		PerTxAsset:        pgxText("USDC"),
+		DailyAmount:       limits.ToNumeric(tier.DailyUSD),
+		WeeklyAmount:      limits.ToNumeric(tier.WeeklyUSD),
+		MonthlyAmount:     limits.ToNumeric(tier.MonthlyUSD),
+		PeriodAsset:       "USDC",
+		Timezone:          "UTC",
+		ResetDayOfWeek:    1, // Monday
+		ResetDayOfMonth:   1,
+		AllowedRecipients: []byte("[]"),
+		DeniedRecipients:  []byte("[]"),
+		Enabled:           true,
+		Metadata: []byte(`{"tier":"` + tier.Name + `"}`),
 	})
 	if err != nil {
 		return internalError(c, err)
