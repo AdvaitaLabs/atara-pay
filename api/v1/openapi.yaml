@@ -84,6 +84,31 @@ components:
         session JWT. The server inspects the prefix and routes accordingly.
 
   # ──────────────────────────────────────────────────────────────────────
+  # Reusable parameters
+  # ──────────────────────────────────────────────────────────────────────
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      description: Maximum rows to return. Capped at 200; defaults to 50.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    OffsetParam:
+      name: offset
+      in: query
+      description: Rows to skip. Defaults to 0.
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  # ──────────────────────────────────────────────────────────────────────
   # Reusable error shape
   # ──────────────────────────────────────────────────────────────────────
   schemas:
@@ -195,6 +220,156 @@ components:
           type: string
           example: "sk_test_aB3dE7fGhJ2k"
 
+    # ────────────────────────────────────────────────────────────────────
+    # API key management (post-signup)
+    # ────────────────────────────────────────────────────────────────────
+    APIKey:
+      type: object
+      description: |
+        Safe-to-return projection. Never contains the raw secret — only
+        the prefix the user can use to recognize it in the dashboard.
+      required: [id, name, environment, prefix]
+      properties:
+        id: { type: string, example: "ak_01J9K…" }
+        name: { type: string, example: "production-backend" }
+        environment:
+          type: string
+          enum: [test, live]
+        prefix:
+          type: string
+          example: "sk_test_aB3dE7fGhJ2k"
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+
+    CreateAPIKeyRequest:
+      type: object
+      required: [name, environment]
+      properties:
+        name:
+          type: string
+          example: "production-backend"
+        environment:
+          type: string
+          enum: [test, live]
+
+    CreateAPIKeyResponse:
+      allOf:
+        - $ref: '#/components/schemas/APIKey'
+        - type: object
+          required: [key]
+          properties:
+            key:
+              type: string
+              description: Raw secret — ONE-TIME.
+            _notice:
+              type: string
+
+    RevokeAPIKeyRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional audit-trail note; defaults to "manually revoked".
+
+    ListAPIKeysResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/APIKey' }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Tenant-level limits (policies + violations)
+    # ────────────────────────────────────────────────────────────────────
+    Tier:
+      type: string
+      enum: [conservative, standard, aggressive, custom]
+      description: |
+        Preset spending tiers. New tenants land at `conservative`
+        (per-tx $5 / daily $20 / weekly $100 / monthly $300). Switch via
+        PUT /v1/tenants/me/limits.
+
+    Policy:
+      type: object
+      description: |
+        A limit_policies row, safe-to-return projection.
+      required: [id, scope_type, period_asset, timezone, enabled]
+      properties:
+        id: { type: string, example: "pol_01J9K…" }
+        scope_type:
+          type: string
+          enum: [tenant_default, wallet_group, wallet, session_key]
+        tier: { $ref: '#/components/schemas/Tier' }
+        per_tx_amount:
+          type: string
+          description: Decimal USD; empty when unset.
+          example: "5"
+        daily_amount:   { type: string, example: "20" }
+        weekly_amount:  { type: string, example: "100" }
+        monthly_amount: { type: string, example: "300" }
+        period_asset:   { type: string, example: "USDC" }
+        timezone:       { type: string, example: "UTC" }
+        enabled:        { type: boolean }
+        created_at:     { type: string, format: date-time }
+
+    UpdateTenantLimitsRequest:
+      type: object
+      description: |
+        Specify EITHER `tier` OR all four explicit caps — never both. The
+        server rejects partial cap updates so column state stays
+        consistent.
+      oneOf:
+        - type: object
+          required: [tier]
+          properties:
+            tier:
+              type: string
+              enum: [conservative, standard, aggressive]
+        - type: object
+          required: [per_tx_amount, daily_amount, weekly_amount, monthly_amount]
+          properties:
+            per_tx_amount:   { type: string, example: "100" }
+            daily_amount:    { type: string, example: "500" }
+            weekly_amount:   { type: string, example: "3000" }
+            monthly_amount:  { type: string, example: "8000" }
+
+    Violation:
+      type: object
+      required: [id, type]
+      properties:
+        id:
+          type: integer
+          format: int64
+        type:
+          type: string
+          enum:
+            - per_tx_exceeded
+            - daily_exceeded
+            - weekly_exceeded
+            - monthly_exceeded
+            - recipient_denied
+            - recipient_not_allowlisted
+            - policy_expired
+            - session_key_expired
+        policy_id:           { type: string }
+        wallet_id:           { type: string }
+        session_key_id:      { type: string }
+        transaction_id:      { type: string }
+        attempted_amount:    { type: string }
+        attempted_asset:     { type: string }
+        attempted_recipient: { type: string }
+        created_at:          { type: string, format: date-time }
+
+    ListViolationsResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Violation' }
+
 # ──────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────
@@ -287,3 +462,142 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # API key management
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/api-keys:
+    get:
+      tags: [Auth]
+      operationId: listAPIKeys
+      summary: List the tenant's API keys (active + revoked)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListAPIKeysResponse' }
+    post:
+      tags: [Auth]
+      operationId: createAPIKey
+      summary: Mint a new API key
+      description: |
+        Returns the raw `key` string ONCE. Store it immediately — only the
+        prefix is recoverable later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAPIKeyRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateAPIKeyResponse' }
+        '400':
+          description: Invalid input
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Role cannot manage keys (owner/admin required)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/api-keys/{id}:
+    delete:
+      tags: [Auth]
+      operationId: revokeAPIKey
+      summary: Revoke an API key
+      description: |
+        Idempotent. Repeating the call on an already-revoked key returns
+        the same row unchanged, preserving the original revoked_at
+        timestamp.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RevokeAPIKeyRequest' }
+      responses:
+        '200':
+          description: Revoked (or already revoked)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/APIKey' }
+        '403':
+          description: Role cannot revoke keys
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Key not found in this tenant
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Tenant-level spending limits
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/tenants/me/limits:
+    get:
+      tags: [Limits]
+      operationId: getTenantLimits
+      summary: Get the current tenant_default policy
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Policy' } }
+        '404':
+          description: No tenant_default policy has been set
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    put:
+      tags: [Limits]
+      operationId: updateTenantLimits
+      summary: Switch tier or set explicit caps
+      description: |
+        Supply EITHER `tier` (preset) OR all four explicit cap fields.
+        Partial cap updates are rejected — the four columns move
+        together. The server disables the prior active policy and
+        inserts a fresh row, so `limit_violations.policy_id` keeps
+        referencing the policy each violation actually breached.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTenantLimitsRequest' }
+      responses:
+        '200':
+          description: New tenant_default policy
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Policy' } }
+        '400':
+          description: Body shape invalid (e.g. both tier and caps supplied)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: Role cannot change tenant limits
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/tenants/me/limits/violations:
+    get:
+      tags: [Limits]
+      operationId: listLimitViolations
+      summary: Paginated audit log of rejected transfers
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListViolationsResponse' }
