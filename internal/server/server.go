@@ -120,6 +120,7 @@ func (s *Server) routes() {
 		v1.Post("/wallet-groups", s.wgHandlers.Create)
 		v1.Get("/wallet-groups", s.wgHandlers.List)
 		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
+		v1.Post("/wallet-groups/:id/transactions", s.wgHandlers.SendTransaction)
 	}
 
 	// Rail-backed routes (unchanged from MVP).

@@ -70,7 +70,7 @@ type OnrampOrder struct {
 	Provider          string             `json:"provider"`
 	ProviderOrderID   pgtype.Text        `json:"provider_order_id"`
 	CheckoutUrl       pgtype.Text        `json:"checkout_url"`
-	FiatAmount        pgtype.Numeric     `json:"fiat_amount"`
+	FiatAmount        string             `json:"fiat_amount"`
 	FiatCurrency      string             `json:"fiat_currency"`
 	Asset             string             `json:"asset"`
 	Chain             string             `json:"chain"`
@@ -131,7 +131,7 @@ type Transaction struct {
 	Chain             string             `json:"chain"`
 	Direction         string             `json:"direction"`
 	Counterparty      string             `json:"counterparty"`
-	Amount            pgtype.Numeric     `json:"amount"`
+	Amount            string             `json:"amount"`
 	Asset             string             `json:"asset"`
 	AmountUsd         pgtype.Numeric     `json:"amount_usd"`
 	Status            string             `json:"status"`
@@ -154,7 +154,7 @@ type Transaction struct {
 type UsageCounter struct {
 	PolicyID   string             `json:"policy_id"`
 	PeriodKey  string             `json:"period_key"`
-	UsedAmount pgtype.Numeric     `json:"used_amount"`
+	UsedAmount string             `json:"used_amount"`
 	UsedAsset  string             `json:"used_asset"`
 	LastTxID   pgtype.Text        `json:"last_tx_id"`
 	FlushedAt  pgtype.Timestamptz `json:"flushed_at"`

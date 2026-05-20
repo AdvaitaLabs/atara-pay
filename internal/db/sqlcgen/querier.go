@@ -19,6 +19,9 @@ type Querier interface {
 	// Queries here are used by signup, billing, and the customer self-service
 	// account page.
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
+	// Money-movement audit table. Append-mostly: status fields advance via
+	// UPDATE but rows are never deleted.
+	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	// Users are the humans logging into the dashboard. Always tenant-scoped.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// One wallet = one on-chain account on one rail (CrossMint / Tempo /
@@ -34,6 +37,8 @@ type Querier interface {
 	GetAPIKeyByID(ctx context.Context, id string) (ApiKey, error)
 	GetTenantByEmail(ctx context.Context, primaryEmail string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id string) (Tenant, error)
+	GetTransactionByID(ctx context.Context, id string) (Transaction, error)
+	GetTransactionByIdempotencyKey(ctx context.Context, arg GetTransactionByIdempotencyKeyParams) (Transaction, error)
 	// Some sign-in flows look up across tenants (e.g. user belongs to multiple
 	// companies). Returns 0..n rows.
 	GetUserByEmail(ctx context.Context, email string) ([]User, error)
@@ -63,6 +68,9 @@ type Querier interface {
 	// All agent groups belonging to a particular user group (parent → child).
 	// Used by the dashboard to show "Alice's agents" under Alice's user group.
 	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
+	ListTransactionsByGroup(ctx context.Context, arg ListTransactionsByGroupParams) ([]Transaction, error)
+	ListTransactionsByTenant(ctx context.Context, arg ListTransactionsByTenantParams) ([]Transaction, error)
+	ListTransactionsByWallet(ctx context.Context, arg ListTransactionsByWalletParams) ([]Transaction, error)
 	ListUsersInTenant(ctx context.Context, tenantID string) ([]User, error)
 	// Dashboard listing. Filter by owner_type (e.g. only show agents) is
 	// handled at the application layer.
@@ -81,6 +89,7 @@ type Querier interface {
 	TouchUserLogin(ctx context.Context, id string) error
 	UpdateTenantPlan(ctx context.Context, arg UpdateTenantPlanParams) (Tenant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
+	UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) (Transaction, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	// Used by the keystore when the master key rotates. We keep encrypted_
 	// private_key + key_version together to avoid ever decrypting with the

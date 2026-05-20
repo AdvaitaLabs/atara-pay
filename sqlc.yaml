@@ -30,5 +30,5 @@ sql:
         # All Atara amount math goes through math/big or shopspring/decimal.
         # (BYTEA is left at sqlc's default []byte — no override needed.)
         overrides:
-          - db_type: "numeric"
+          - db_type: "pg_catalog.numeric"
             go_type: "string"
