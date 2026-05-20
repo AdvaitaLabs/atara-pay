@@ -11,6 +11,10 @@ import (
 type Config struct {
 	Port string
 
+	// Persistence
+	DatabaseURL string // postgres://...
+	RedisURL    string // redis://...
+
 	// CrossMint
 	CrossMintAPIKey  string
 	CrossMintBaseURL string
@@ -33,6 +37,8 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Port:             getEnv("ATARA_PAY_PORT", "8080"),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		RedisURL:         os.Getenv("REDIS_URL"),
 		CrossMintAPIKey:  os.Getenv("CROSSMINT_API_KEY"),
 		CrossMintBaseURL: os.Getenv("CROSSMINT_BASE_URL"),
 		TempoRPCURL:      os.Getenv("TEMPO_RPC_URL"),
