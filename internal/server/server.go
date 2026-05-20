@@ -51,9 +51,10 @@ type Server struct {
 	app    *fiber.App
 	router *router.Router
 
-	pool         *pgxpool.Pool
-	authHandlers *handlers.Auth
-	wgHandlers   *handlers.WalletGroups
+	pool           *pgxpool.Pool
+	authHandlers   *handlers.Auth
+	wgHandlers     *handlers.WalletGroups
+	limitsHandlers *handlers.Limits
 	// queries is the sqlcgen.*Queries the middleware needs. We re-use the
 	// queries built inside handlers.Auth to avoid two duplicate caches.
 	queries    middleware.Queries
@@ -80,6 +81,7 @@ func New(d Deps) *Server {
 		// behind a narrow interface. The sqlcgen-generated *Queries
 		// satisfies it directly.
 		s.queries = handlers.NewQueriesForMiddleware(d.Pool)
+		s.limitsHandlers = handlers.NewLimits(d.Pool)
 
 		// Wallet-group handler needs all four extra deps. Missing any
 		// disables the endpoint — server still boots.
@@ -122,6 +124,13 @@ func (s *Server) routes() {
 		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
 		v1.Post("/wallet-groups/:id/transactions", s.wgHandlers.SendTransaction)
 		v1.Post("/wallet-groups/:id/onramp", s.wgHandlers.CreateOnramp)
+	}
+
+	// Tenant-level limit management.
+	if s.limitsHandlers != nil {
+		v1.Get("/tenants/me/limits", s.limitsHandlers.GetTenantLimits)
+		v1.Put("/tenants/me/limits", s.limitsHandlers.UpdateTenantLimits)
+		v1.Get("/tenants/me/limits/violations", s.limitsHandlers.ListViolations)
 	}
 
 	// Rail-backed routes (unchanged from MVP).
