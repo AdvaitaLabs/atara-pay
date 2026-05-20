@@ -44,6 +44,15 @@ type Querier interface {
 	// and the per-rail wallets that belong to it. One group typically holds
 	// 2-3 wallets: one CrossMint, one Tempo, eventually one Loka-LN.
 	CreateWalletGroup(ctx context.Context, arg CreateWalletGroupParams) (WalletGroup, error)
+	// Customer-registered webhook destinations. The HMAC secret is opaque
+	// bytes; the application minted it and showed it once at creation.
+	CreateWebhookEndpoint(ctx context.Context, arg CreateWebhookEndpointParams) (WebhookEndpoint, error)
+	// Per-(domain-event, subscribed-endpoint) delivery records. The delivery
+	// worker iterates pending/failed rows whose next_attempt_at has arrived.
+	CreateWebhookEvent(ctx context.Context, arg CreateWebhookEventParams) (WebhookEvent, error)
+	// Soft delete via status='deleted' so historical webhook_events still
+	// resolve their endpoint_id back to a row.
+	DeleteWebhookEndpoint(ctx context.Context, id string) error
 	// Soft-off: row stays so historical violations still reference it.
 	DisableLimitPolicy(ctx context.Context, id string) (LimitPolicy, error)
 	// Hot path on every API request. The index on key_hash makes this O(1).
@@ -94,13 +103,23 @@ type Querier interface {
 	// customer POSTs /v1/wallet-groups twice with the same owner_ref, we
 	// return the existing group instead of failing.
 	GetWalletGroupByOwnerRef(ctx context.Context, arg GetWalletGroupByOwnerRefParams) (WalletGroup, error)
+	GetWebhookEndpointByID(ctx context.Context, id string) (WebhookEndpoint, error)
+	GetWebhookEventByID(ctx context.Context, id string) (WebhookEvent, error)
 	// Dashboard listing. Includes revoked keys so customers can audit.
 	ListAPIKeysInTenant(ctx context.Context, tenantID string) ([]ApiKey, error)
+	// The publisher fans out one domain event to every active subscriber of
+	// this tenant. Filtering on subscribed_events happens in app code (JSONB
+	// containment) so each event is matched against the array.
+	ListActiveEndpointsForTenant(ctx context.Context, tenantID string) ([]WebhookEndpoint, error)
 	// Used by background sweepers and the admin console.
 	ListActiveTenants(ctx context.Context, arg ListActiveTenantsParams) ([]Tenant, error)
 	// All agent groups belonging to a particular user group (parent → child).
 	// Used by the dashboard to show "Alice's agents" under Alice's user group.
 	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
+	// Hot path for the delivery worker. Hits the partial index on
+	// next_attempt_at WHERE status IN ('pending','failed'). LIMIT enforces
+	// per-tick budget.
+	ListDueWebhookEvents(ctx context.Context, arg ListDueWebhookEventsParams) ([]WebhookEvent, error)
 	ListEnabledPoliciesForTenant(ctx context.Context, tenantID string) ([]LimitPolicy, error)
 	// Sweep: keys whose expires_at has passed but status still says
 	// active/rotating. The cron flips them to 'expired'.
@@ -130,17 +149,39 @@ type Querier interface {
 	// before Loka-LN — gives the dashboard a stable display order without
 	// per-rail logic in the frontend.
 	ListWalletsByGroup(ctx context.Context, groupID string) ([]Wallet, error)
+	ListWebhookEndpointsForTenant(ctx context.Context, arg ListWebhookEndpointsForTenantParams) ([]WebhookEndpoint, error)
+	ListWebhookEventsForEndpoint(ctx context.Context, arg ListWebhookEventsForEndpointParams) ([]WebhookEvent, error)
+	ListWebhookEventsForTenant(ctx context.Context, arg ListWebhookEventsForTenantParams) ([]WebhookEvent, error)
 	MarkEmailVerified(ctx context.Context, id string) error
+	// Terminal state after the retry budget is exhausted.
+	MarkWebhookEventDead(ctx context.Context, id string) error
+	MarkWebhookEventDelivered(ctx context.Context, arg MarkWebhookEventDeliveredParams) (WebhookEvent, error)
+	// Take ownership: flip status to 'delivering' so a parallel worker
+	// doesn't pick the same row up. Returns the row only when the transition
+	// succeeded — concurrent workers see no rows and skip.
+	MarkWebhookEventDelivering(ctx context.Context, id string) (WebhookEvent, error)
+	// One failed delivery attempt. Bumps attempts + schedules next retry.
+	// The worker computes next_attempt_at via exponential backoff and
+	// passes it in.
+	MarkWebhookEventFailed(ctx context.Context, arg MarkWebhookEventFailedParams) (WebhookEvent, error)
+	PauseWebhookEndpoint(ctx context.Context, id string) error
 	RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (ApiKey, error)
 	// Idempotent at the SQL layer via the WHERE status='active' guard —
 	// repeat revokes don't overwrite the original revoked_at.
 	RevokeSessionKey(ctx context.Context, arg RevokeSessionKeyParams) (SessionKey, error)
+	// Bumps the secret and its version atomically. Deliveries already in
+	// flight keep using the prior version via webhook_events.signature_version.
+	RotateWebhookEndpointSecret(ctx context.Context, arg RotateWebhookEndpointSecretParams) (WebhookEndpoint, error)
 	// Soft delete. The row stays so audit / reporting can still find it.
 	// Cascades to the wallets table via the foreign key (which then go
 	// status='deleted' through the same touch trigger).
 	SoftDeleteWalletGroup(ctx context.Context, id string) error
 	TouchAPIKeyUsage(ctx context.Context, id string) error
 	TouchUserLogin(ctx context.Context, id string) error
+	// Bumps the failure counter and returns the new value so the worker can
+	// decide whether to auto-pause the endpoint (e.g. after 30 in a row).
+	TouchWebhookEndpointFailure(ctx context.Context, id string) (int32, error)
+	TouchWebhookEndpointSuccess(ctx context.Context, id string) error
 	// Replace the spending caps. Recipient lists, scope, and other invariants
 	// are NOT mutable here — for those, customers create a new policy and
 	// disable the old one.
@@ -160,6 +201,11 @@ type Querier interface {
 	UpdateWalletEncryptedKey(ctx context.Context, arg UpdateWalletEncryptedKeyParams) error
 	UpdateWalletGroupDisplayName(ctx context.Context, arg UpdateWalletGroupDisplayNameParams) (WalletGroup, error)
 	UpdateWalletStatus(ctx context.Context, arg UpdateWalletStatusParams) (Wallet, error)
+	// Mutable surface: URL, subscribed_events, description, status. The
+	// secret is rotated via RotateWebhookEndpointSecret only — keeping the
+	// updates separate so a tenant can't accidentally race a URL change with
+	// a secret rotation in the same call.
+	UpdateWebhookEndpoint(ctx context.Context, arg UpdateWebhookEndpointParams) (WebhookEndpoint, error)
 	// Durable mirror of the hot-path Redis counters. Redis is the canonical
 	// source for live values; PG is the persisted copy flushed periodically
 	// so audits, reports, and Redis-outage recovery work.
