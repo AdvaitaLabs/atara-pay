@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/adaptor"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -28,6 +29,7 @@ import (
 	paygwerr "github.com/atara-xyz/atara-pay/internal/errors"
 	"github.com/atara-xyz/atara-pay/internal/keystore"
 	"github.com/atara-xyz/atara-pay/internal/limits"
+	"github.com/atara-xyz/atara-pay/internal/metrics"
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server/handlers"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
@@ -53,6 +55,15 @@ type Deps struct {
 	// (daily / weekly / monthly). Nil falls back to the synchronous gates
 	// only — per-tx + recipient + expiry still enforce.
 	Redis *redis.Client
+
+	// Optional. Metrics enables the /metrics endpoint + HTTP middleware.
+	// Pass metrics.NewRegistry() in main; nil disables instrumentation.
+	Metrics *metrics.Registry
+
+	// RateLimitPerMinute caps per-tenant requests. 0 = unlimited (and the
+	// middleware is not mounted). Redis must be set for the limit to
+	// actually enforce; otherwise the middleware passes through.
+	RateLimitPerMinute int
 }
 
 // Server is the HTTP entry point.
@@ -61,15 +72,21 @@ type Server struct {
 	router *router.Router
 
 	pool               *pgxpool.Pool
+	redis              *redis.Client
 	authHandlers       *handlers.Auth
 	wgHandlers         *handlers.WalletGroups
 	limitsHandlers     *handlers.Limits
 	sessionKeyHandlers *handlers.SessionKeys
 	webhookHandlers    *handlers.Webhooks
+	vaddrHandlers      *handlers.VirtualAddresses
+	stmtsHandlers      *handlers.Statements
 	// queries is the sqlcgen.*Queries the middleware needs. We re-use the
 	// queries built inside handlers.Auth to avoid two duplicate caches.
 	queries    middleware.Queries
 	signingKey []byte
+
+	metrics            *metrics.Registry
+	rateLimitPerMinute int
 }
 
 // New constructs a Server from its deps. Auth routes are mounted only when
@@ -83,7 +100,15 @@ func New(d Deps) *Server {
 		ErrorHandler:          errorHandler,
 	})
 
-	s := &Server{app: app, router: d.Router, pool: d.Pool, signingKey: d.SessionSigningKey}
+	s := &Server{
+		app:                app,
+		router:             d.Router,
+		pool:               d.Pool,
+		redis:              d.Redis,
+		signingKey:         d.SessionSigningKey,
+		metrics:            d.Metrics,
+		rateLimitPerMinute: d.RateLimitPerMinute,
+	}
 
 	if d.Pool != nil {
 		// 24h default TTL (handlers.NewAuth substitutes when ttl <= 0).
@@ -133,6 +158,15 @@ func New(d Deps) *Server {
 
 		// Webhook endpoint CRUD. No external deps — just the pool.
 		s.webhookHandlers = handlers.NewWebhooks(d.Pool)
+
+		// Virtual addresses (TIP-1022) need both a Tempo adapter and the
+		// keystore. Missing either disables the routes cleanly.
+		if d.Tempo != nil && d.Keystore != nil {
+			s.vaddrHandlers = handlers.NewVirtualAddresses(d.Pool, d.Tempo, d.Keystore)
+		}
+
+		// Accounting / statements — pure aggregates, no extra deps.
+		s.stmtsHandlers = handlers.NewStatements(d.Pool)
 	}
 
 	s.routes()
@@ -140,9 +174,19 @@ func New(d Deps) *Server {
 }
 
 func (s *Server) routes() {
+	// Observability middleware runs first so it captures every request,
+	// including the 401s the auth middleware bounces. Nil registry → no-op.
+	s.app.Use(middleware.Metrics(s.metrics))
+
 	// Public.
 	s.app.Get("/health", s.health)
 	s.app.Get("/v1/rails", s.listRails)
+
+	// Prometheus scrape target. Public so external collectors can pull.
+	// Don't put it under /v1 — operators expect /metrics at root.
+	if s.metrics != nil {
+		s.app.Get("/metrics", adaptor.HTTPHandler(s.metrics.Handler()))
+	}
 
 	if s.authHandlers != nil {
 		s.app.Post("/signup", s.authHandlers.Signup)
@@ -153,6 +197,14 @@ func (s *Server) routes() {
 	v1 := s.app.Group("/v1")
 	if s.authHandlers != nil && len(s.signingKey) >= 32 {
 		v1.Use(middleware.EitherAuth(s.queries, s.signingKey))
+	}
+	// Per-tenant rate limit AFTER auth so we know which tenant_id to key on.
+	// When RateLimitPerMinute is 0 or Redis is nil, the middleware is a
+	// pass-through.
+	if s.rateLimitPerMinute > 0 {
+		v1.Use(middleware.RateLimit(s.redis, middleware.RateLimitConfig{
+			RequestsPerMinute: s.rateLimitPerMinute,
+		}))
 	}
 
 	// API key management.
@@ -176,6 +228,21 @@ func (s *Server) routes() {
 		v1.Post("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.Create)
 		v1.Get("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.List)
 		v1.Delete("/wallet-groups/:id/session-keys/:sk_id", s.sessionKeyHandlers.Revoke)
+	}
+
+	// Virtual addresses (TIP-1022) — per-customer deposit address for
+	// Tempo wallets. Useful when a merchant wants each downstream user to
+	// have a unique on-chain address that funnels back to the wallet.
+	if s.vaddrHandlers != nil {
+		v1.Post("/wallet-groups/:id/virtual-addresses", s.vaddrHandlers.Create)
+		v1.Get("/wallet-groups/:id/virtual-addresses", s.vaddrHandlers.List)
+	}
+
+	// Accounting endpoints (M9). Aggregates over transactions +
+	// onramp_orders; no extra schema.
+	if s.stmtsHandlers != nil {
+		v1.Get("/wallet-groups/:id/balance", s.stmtsHandlers.GetGroupBalance)
+		v1.Get("/tenants/me/statements/:month", s.stmtsHandlers.GetMonthlyStatement)
 	}
 
 	// Tenant-level limit management.

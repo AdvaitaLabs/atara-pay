@@ -12,6 +12,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/config"
 	"github.com/atara-xyz/atara-pay/internal/db"
 	"github.com/atara-xyz/atara-pay/internal/keystore"
+	"github.com/atara-xyz/atara-pay/internal/metrics"
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server"
 	"github.com/atara-xyz/atara-pay/internal/sessionkey"
@@ -150,14 +151,21 @@ func main() {
 		ksIface = ks
 	}
 
+	// Prometheus registry. One per process; nil collectors are no-ops so
+	// the rest of the server is unaffected if we ever want to disable.
+	metricsReg := metrics.NewRegistry()
+	log.Println("[atara-pay] metrics registered (/metrics)")
+
 	s := server.New(server.Deps{
-		Router:            r,
-		Pool:              pool,
-		SessionSigningKey: cfg.SessionSigningKey,
-		CrossMint:         cmAdapter,
-		Tempo:             tpAdapter,
-		Keystore:          ksIface,
-		Redis:             rdb,
+		Router:             r,
+		Pool:               pool,
+		SessionSigningKey:  cfg.SessionSigningKey,
+		CrossMint:          cmAdapter,
+		Tempo:              tpAdapter,
+		Keystore:           ksIface,
+		Redis:              rdb,
+		Metrics:            metricsReg,
+		RateLimitPerMinute: 600, // sensible default; M13.2 makes it per-tier
 	})
 
 	// Session-key background rotator. Sweeps expired rows + logs rotation
