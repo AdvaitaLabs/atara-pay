@@ -1,4 +1,18 @@
 // Package server wires the public HTTP API on top of the router.
+//
+// Route layout:
+//
+//	Public (no auth):
+//	  GET    /health
+//	  GET    /v1/rails
+//	  POST   /signup
+//	  POST   /login
+//
+//	Authenticated (Bearer — accepts both API keys and session JWTs):
+//	  GET    /v1/api-keys
+//	  POST   /v1/api-keys
+//	  DELETE /v1/api-keys/:id
+//	  *all current /v1/wallets, /v1/transactions, /v1/onramp routes*
 package server
 
 import (
@@ -6,34 +20,107 @@ import (
 	"net/http"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/atara-xyz/atara-pay/internal/adapters/crossmint"
+	"github.com/atara-xyz/atara-pay/internal/adapters/tempo"
 	paygwerr "github.com/atara-xyz/atara-pay/internal/errors"
+	"github.com/atara-xyz/atara-pay/internal/keystore"
 	"github.com/atara-xyz/atara-pay/internal/router"
+	"github.com/atara-xyz/atara-pay/internal/server/handlers"
+	"github.com/atara-xyz/atara-pay/internal/server/middleware"
 	"github.com/atara-xyz/atara-pay/internal/types"
 )
 
+// Deps bundles everything the server needs to wire its routes. Constructed
+// once in main and passed in.
+type Deps struct {
+	Router            *router.Router
+	Pool              *pgxpool.Pool // nil disables auth-required routes
+	SessionSigningKey []byte
+
+	// Optional. When all three are non-nil AND Pool is set, the dual-rail
+	// /v1/wallet-groups endpoint is mounted. Missing any one disables it.
+	CrossMint *crossmint.Adapter
+	Tempo     *tempo.Adapter
+	Keystore  keystore.Keystore
+}
+
+// Server is the HTTP entry point.
 type Server struct {
 	app    *fiber.App
 	router *router.Router
+
+	pool         *pgxpool.Pool
+	authHandlers *handlers.Auth
+	wgHandlers   *handlers.WalletGroups
+	// queries is the sqlcgen.*Queries the middleware needs. We re-use the
+	// queries built inside handlers.Auth to avoid two duplicate caches.
+	queries    middleware.Queries
+	signingKey []byte
 }
 
-func New(r *router.Router) *Server {
+// New constructs a Server from its deps. Auth routes are mounted only when
+// Deps.Pool is non-nil; in pure in-memory mode (no DB) we still serve the
+// /v1/{wallets,transactions,onramp} endpoints for backwards compatibility
+// during the migration window.
+func New(d Deps) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "atara-pay",
 		DisableStartupMessage: true,
 		ErrorHandler:          errorHandler,
 	})
 
-	s := &Server{app: app, router: r}
+	s := &Server{app: app, router: d.Router, pool: d.Pool, signingKey: d.SessionSigningKey}
+
+	if d.Pool != nil {
+		// 24h default TTL (handlers.NewAuth substitutes when ttl <= 0).
+		s.authHandlers = handlers.NewAuth(d.Pool, d.SessionSigningKey, 0)
+		// Auth middleware wants the same Querier the handlers use, but
+		// behind a narrow interface. The sqlcgen-generated *Queries
+		// satisfies it directly.
+		s.queries = handlers.NewQueriesForMiddleware(d.Pool)
+
+		// Wallet-group handler needs all four extra deps. Missing any
+		// disables the endpoint — server still boots.
+		if d.CrossMint != nil && d.Tempo != nil && d.Keystore != nil {
+			s.wgHandlers = handlers.NewWalletGroups(d.Pool, d.CrossMint, d.Tempo, d.Keystore)
+		}
+	}
+
 	s.routes()
 	return s
 }
 
 func (s *Server) routes() {
+	// Public.
 	s.app.Get("/health", s.health)
 	s.app.Get("/v1/rails", s.listRails)
 
+	if s.authHandlers != nil {
+		s.app.Post("/signup", s.authHandlers.Signup)
+		s.app.Post("/login", s.authHandlers.Login)
+	}
+
+	// Authenticated /v1 group.
 	v1 := s.app.Group("/v1")
+	if s.authHandlers != nil && len(s.signingKey) >= 32 {
+		v1.Use(middleware.EitherAuth(s.queries, s.signingKey))
+	}
+
+	// API key management.
+	if s.authHandlers != nil {
+		v1.Get("/api-keys", s.authHandlers.ListAPIKeys)
+		v1.Post("/api-keys", s.authHandlers.CreateAPIKey)
+		v1.Delete("/api-keys/:id", s.authHandlers.RevokeAPIKey)
+	}
+
+	// Dual-rail wallet-group endpoints.
+	if s.wgHandlers != nil {
+		v1.Post("/wallet-groups", s.wgHandlers.Create)
+	}
+
+	// Rail-backed routes (unchanged from MVP).
 	v1.Post("/wallets", s.createWallet)
 	v1.Get("/wallets/:locator", s.getWallet)
 	v1.Get("/wallets/:locator/balances", s.getBalances)
