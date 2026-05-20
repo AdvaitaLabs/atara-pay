@@ -15,6 +15,11 @@ type Querier interface {
 	// requests (Bearer sk_test_… / sk_live_…). The raw secret is shown to the
 	// user exactly once at creation; from then on we look up by SHA-256 hash.
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
+	// Declarative spending rules attached to a scope.
+	// scope_type ∈ {tenant_default, wallet_group, wallet, session_key}.
+	CreateLimitPolicy(ctx context.Context, arg CreateLimitPolicyParams) (LimitPolicy, error)
+	// Append-only audit log of every rejected attempt.
+	CreateLimitViolation(ctx context.Context, arg CreateLimitViolationParams) (LimitViolation, error)
 	// Fiat → crypto purchases. The provider's hosted checkout URL is captured
 	// at creation; status advances via webhook updates from the provider.
 	CreateOnrampOrder(ctx context.Context, arg CreateOnrampOrderParams) (OnrampOrder, error)
@@ -34,16 +39,28 @@ type Querier interface {
 	// and the per-rail wallets that belong to it. One group typically holds
 	// 2-3 wallets: one CrossMint, one Tempo, eventually one Loka-LN.
 	CreateWalletGroup(ctx context.Context, arg CreateWalletGroupParams) (WalletGroup, error)
+	// Soft-off: row stays so historical violations still reference it.
+	DisableLimitPolicy(ctx context.Context, id string) (LimitPolicy, error)
 	// Hot path on every API request. The index on key_hash makes this O(1).
 	// Returns the key only if it has not been revoked.
 	GetAPIKeyByHash(ctx context.Context, keyHash []byte) (ApiKey, error)
 	GetAPIKeyByID(ctx context.Context, id string) (ApiKey, error)
+	GetLimitPolicyByID(ctx context.Context, id string) (LimitPolicy, error)
 	GetOnrampOrderByID(ctx context.Context, id string) (OnrampOrder, error)
 	GetOnrampOrderByProviderID(ctx context.Context, arg GetOnrampOrderByProviderIDParams) (OnrampOrder, error)
+	// Resolve the policy attached to a specific scope_id (wallet_group, wallet,
+	// or session_key). Returns the most recently-enabled one if duplicates
+	// exist (defensive — schema doesn't enforce uniqueness here).
+	GetPolicyForScope(ctx context.Context, arg GetPolicyForScopeParams) (LimitPolicy, error)
 	GetTenantByEmail(ctx context.Context, primaryEmail string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id string) (Tenant, error)
+	// The "fallback" policy applied when no more specific policy exists for a
+	// scope. The migration's partial-unique index guarantees at most one
+	// enabled tenant_default per tenant.
+	GetTenantDefaultPolicy(ctx context.Context, tenantID string) (LimitPolicy, error)
 	GetTransactionByID(ctx context.Context, id string) (Transaction, error)
 	GetTransactionByIdempotencyKey(ctx context.Context, arg GetTransactionByIdempotencyKeyParams) (Transaction, error)
+	GetUsageCounter(ctx context.Context, arg GetUsageCounterParams) (UsageCounter, error)
 	// Some sign-in flows look up across tenants (e.g. user belongs to multiple
 	// companies). Returns 0..n rows.
 	GetUserByEmail(ctx context.Context, email string) ([]User, error)
@@ -73,11 +90,16 @@ type Querier interface {
 	// All agent groups belonging to a particular user group (parent → child).
 	// Used by the dashboard to show "Alice's agents" under Alice's user group.
 	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
+	ListEnabledPoliciesForTenant(ctx context.Context, tenantID string) ([]LimitPolicy, error)
+	ListLimitViolationsByTenant(ctx context.Context, arg ListLimitViolationsByTenantParams) ([]LimitViolation, error)
+	ListLimitViolationsByWallet(ctx context.Context, arg ListLimitViolationsByWalletParams) ([]LimitViolation, error)
 	ListOnrampOrdersByGroup(ctx context.Context, arg ListOnrampOrdersByGroupParams) ([]OnrampOrder, error)
 	ListOnrampOrdersByTenant(ctx context.Context, arg ListOnrampOrdersByTenantParams) ([]OnrampOrder, error)
 	ListTransactionsByGroup(ctx context.Context, arg ListTransactionsByGroupParams) ([]Transaction, error)
 	ListTransactionsByTenant(ctx context.Context, arg ListTransactionsByTenantParams) ([]Transaction, error)
 	ListTransactionsByWallet(ctx context.Context, arg ListTransactionsByWalletParams) ([]Transaction, error)
+	// Used by the dashboard "remaining today / this week / this month" view.
+	ListUsageCountersForPolicy(ctx context.Context, policyID string) ([]UsageCounter, error)
 	ListUsersInTenant(ctx context.Context, tenantID string) ([]User, error)
 	// Dashboard listing. Filter by owner_type (e.g. only show agents) is
 	// handled at the application layer.
@@ -94,6 +116,10 @@ type Querier interface {
 	SoftDeleteWalletGroup(ctx context.Context, id string) error
 	TouchAPIKeyUsage(ctx context.Context, id string) error
 	TouchUserLogin(ctx context.Context, id string) error
+	// Replace the spending caps. Recipient lists, scope, and other invariants
+	// are NOT mutable here — for those, customers create a new policy and
+	// disable the old one.
+	UpdateLimitPolicyCaps(ctx context.Context, arg UpdateLimitPolicyCapsParams) (LimitPolicy, error)
 	UpdateOnrampOrderStatus(ctx context.Context, arg UpdateOnrampOrderStatusParams) (OnrampOrder, error)
 	UpdateTenantPlan(ctx context.Context, arg UpdateTenantPlanParams) (Tenant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
@@ -105,6 +131,18 @@ type Querier interface {
 	UpdateWalletEncryptedKey(ctx context.Context, arg UpdateWalletEncryptedKeyParams) error
 	UpdateWalletGroupDisplayName(ctx context.Context, arg UpdateWalletGroupDisplayNameParams) (WalletGroup, error)
 	UpdateWalletStatus(ctx context.Context, arg UpdateWalletStatusParams) (Wallet, error)
+	// Durable mirror of the hot-path Redis counters. Redis is the canonical
+	// source for live values; PG is the persisted copy flushed periodically
+	// so audits, reports, and Redis-outage recovery work.
+	//
+	// period_key formats:
+	//   daily:2026-05-20
+	//   weekly:2026-W21
+	//   monthly:2026-05
+	// Used both by the periodic Redis → PG flush and as a fallback path when
+	// Redis is unavailable. ON CONFLICT updates used_amount monotonically;
+	// we never go backwards (Redis is authoritative for live values).
+	UpsertUsageCounter(ctx context.Context, arg UpsertUsageCounterParams) (UsageCounter, error)
 }
 
 var _ Querier = (*Queries)(nil)
