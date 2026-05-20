@@ -23,6 +23,11 @@ type Querier interface {
 	// Fiat → crypto purchases. The provider's hosted checkout URL is captured
 	// at creation; status advances via webhook updates from the provider.
 	CreateOnrampOrder(ctx context.Context, arg CreateOnrampOrderParams) (OnrampOrder, error)
+	// Session keys: delegated signers attached to a wallet, each carrying its
+	// own limit_policy and rotation schedule. The DB invariants are enforced
+	// by the schema (see migration 000004); these queries are kept minimal so
+	// the orchestration service can compose them in transactions.
+	CreateSessionKey(ctx context.Context, arg CreateSessionKeyParams) (SessionKey, error)
 	// Tenants are ATARA-Pay's primary isolation unit.
 	// Queries here are used by signup, billing, and the customer self-service
 	// account page.
@@ -45,6 +50,11 @@ type Querier interface {
 	// Returns the key only if it has not been revoked.
 	GetAPIKeyByHash(ctx context.Context, keyHash []byte) (ApiKey, error)
 	GetAPIKeyByID(ctx context.Context, id string) (ApiKey, error)
+	// Hot path: when a transaction is signed with a session key, we identify
+	// the signer by its 0x-address and need the row's encrypted_priv_key +
+	// policy_id + status in one lookup. The partial index on (public_address)
+	// WHERE status='active' makes this O(1).
+	GetActiveSessionKeyByPublicAddress(ctx context.Context, publicAddress string) (SessionKey, error)
 	GetLimitPolicyByID(ctx context.Context, id string) (LimitPolicy, error)
 	GetOnrampOrderByID(ctx context.Context, id string) (OnrampOrder, error)
 	GetOnrampOrderByProviderID(ctx context.Context, arg GetOnrampOrderByProviderIDParams) (OnrampOrder, error)
@@ -52,6 +62,7 @@ type Querier interface {
 	// or session_key). Returns the most recently-enabled one if duplicates
 	// exist (defensive — schema doesn't enforce uniqueness here).
 	GetPolicyForScope(ctx context.Context, arg GetPolicyForScopeParams) (LimitPolicy, error)
+	GetSessionKeyByID(ctx context.Context, id string) (SessionKey, error)
 	GetTenantByEmail(ctx context.Context, primaryEmail string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id string) (Tenant, error)
 	// The "fallback" policy applied when no more specific policy exists for a
@@ -91,10 +102,21 @@ type Querier interface {
 	// Used by the dashboard to show "Alice's agents" under Alice's user group.
 	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
 	ListEnabledPoliciesForTenant(ctx context.Context, tenantID string) ([]LimitPolicy, error)
+	// Sweep: keys whose expires_at has passed but status still says
+	// active/rotating. The cron flips them to 'expired'.
+	ListExpiredSessionKeys(ctx context.Context, arg ListExpiredSessionKeysParams) ([]SessionKey, error)
 	ListLimitViolationsByTenant(ctx context.Context, arg ListLimitViolationsByTenantParams) ([]LimitViolation, error)
 	ListLimitViolationsByWallet(ctx context.Context, arg ListLimitViolationsByWalletParams) ([]LimitViolation, error)
 	ListOnrampOrdersByGroup(ctx context.Context, arg ListOnrampOrdersByGroupParams) ([]OnrampOrder, error)
 	ListOnrampOrdersByTenant(ctx context.Context, arg ListOnrampOrdersByTenantParams) ([]OnrampOrder, error)
+	// Background worker scans this every cycle. The partial index on
+	// next_rotation_at filtered to (rotation_mode='auto_rotate' AND
+	// status='active') keeps the scan tight regardless of total population.
+	ListSessionKeysDueForRotation(ctx context.Context, arg ListSessionKeysDueForRotationParams) ([]SessionKey, error)
+	ListSessionKeysForTenant(ctx context.Context, arg ListSessionKeysForTenantParams) ([]SessionKey, error)
+	// Dashboard listing. Includes revoked / expired so customers can audit
+	// history; the UI strikes through inactive rows.
+	ListSessionKeysForWallet(ctx context.Context, arg ListSessionKeysForWalletParams) ([]SessionKey, error)
 	ListTransactionsByGroup(ctx context.Context, arg ListTransactionsByGroupParams) ([]Transaction, error)
 	ListTransactionsByTenant(ctx context.Context, arg ListTransactionsByTenantParams) ([]Transaction, error)
 	ListTransactionsByWallet(ctx context.Context, arg ListTransactionsByWalletParams) ([]Transaction, error)
@@ -110,6 +132,9 @@ type Querier interface {
 	ListWalletsByGroup(ctx context.Context, groupID string) ([]Wallet, error)
 	MarkEmailVerified(ctx context.Context, id string) error
 	RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (ApiKey, error)
+	// Idempotent at the SQL layer via the WHERE status='active' guard —
+	// repeat revokes don't overwrite the original revoked_at.
+	RevokeSessionKey(ctx context.Context, arg RevokeSessionKeyParams) (SessionKey, error)
 	// Soft delete. The row stays so audit / reporting can still find it.
 	// Cascades to the wallets table via the foreign key (which then go
 	// status='deleted' through the same touch trigger).
@@ -121,6 +146,10 @@ type Querier interface {
 	// disable the old one.
 	UpdateLimitPolicyCaps(ctx context.Context, arg UpdateLimitPolicyCapsParams) (LimitPolicy, error)
 	UpdateOnrampOrderStatus(ctx context.Context, arg UpdateOnrampOrderStatusParams) (OnrampOrder, error)
+	// Atomically reset the auto-rotation cursor after the worker hands out a
+	// replacement key.
+	UpdateSessionKeyNextRotation(ctx context.Context, arg UpdateSessionKeyNextRotationParams) error
+	UpdateSessionKeyStatus(ctx context.Context, arg UpdateSessionKeyStatusParams) (SessionKey, error)
 	UpdateTenantPlan(ctx context.Context, arg UpdateTenantPlanParams) (Tenant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
 	UpdateTransactionStatus(ctx context.Context, arg UpdateTransactionStatusParams) (Transaction, error)
