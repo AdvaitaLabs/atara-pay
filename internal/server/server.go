@@ -31,6 +31,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/router"
 	"github.com/atara-xyz/atara-pay/internal/server/handlers"
 	"github.com/atara-xyz/atara-pay/internal/server/middleware"
+	"github.com/atara-xyz/atara-pay/internal/sessionkey"
 	"github.com/atara-xyz/atara-pay/internal/types"
 )
 
@@ -58,10 +59,11 @@ type Server struct {
 	app    *fiber.App
 	router *router.Router
 
-	pool           *pgxpool.Pool
-	authHandlers   *handlers.Auth
-	wgHandlers     *handlers.WalletGroups
-	limitsHandlers *handlers.Limits
+	pool             *pgxpool.Pool
+	authHandlers     *handlers.Auth
+	wgHandlers       *handlers.WalletGroups
+	limitsHandlers   *handlers.Limits
+	sessionKeyHandlers *handlers.SessionKeys
 	// queries is the sqlcgen.*Queries the middleware needs. We re-use the
 	// queries built inside handlers.Auth to avoid two duplicate caches.
 	queries    middleware.Queries
@@ -103,6 +105,15 @@ func New(d Deps) *Server {
 				d.Pool, d.CrossMint, d.Tempo, d.Keystore, limitsSvc,
 			)
 		}
+
+		// Session-key handler needs the keystore (mint encrypts the
+		// generated private key before persistence). Mounted alongside
+		// the wallet-group routes since session keys are scoped to a
+		// wallet inside a group.
+		if d.Keystore != nil {
+			skSvc := sessionkey.New(d.Pool, d.Keystore)
+			s.sessionKeyHandlers = handlers.NewSessionKeys(d.Pool, skSvc)
+		}
 	}
 
 	s.routes()
@@ -139,6 +150,13 @@ func (s *Server) routes() {
 		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
 		v1.Post("/wallet-groups/:id/transactions", s.wgHandlers.SendTransaction)
 		v1.Post("/wallet-groups/:id/onramp", s.wgHandlers.CreateOnramp)
+	}
+
+	// Session-key management nested under wallet groups.
+	if s.sessionKeyHandlers != nil {
+		v1.Post("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.Create)
+		v1.Get("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.List)
+		v1.Delete("/wallet-groups/:id/session-keys/:sk_id", s.sessionKeyHandlers.Revoke)
 	}
 
 	// Tenant-level limit management.
