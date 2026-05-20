@@ -1,0 +1,289 @@
+openapi: 3.1.0
+
+info:
+  title: ATARA-Pay API
+  description: |
+    **ATARA-Pay** is the protocol-aggregation gateway of the Atara stack.
+    One HTTP API, multiple payment rails (CrossMint, Tempo, soon Lightning
+    + OTC). AI agents and B2B integrators issue wallets, move money, and
+    accept fiat without learning any one provider's SDK.
+
+    ## Authentication
+
+    Every `/v1/*` endpoint accepts EITHER an API key OR a session JWT in
+    the `Authorization: Bearer <token>` header.
+
+    - **API keys** are minted at signup and via `POST /v1/api-keys`.
+      Prefixed `sk_test_…` or `sk_live_…`. Show 40 chars total. Server
+      stores only the SHA-256 hash; the raw key is shown ONCE at creation.
+    - **Session JWTs** come from `POST /login`. Used by the dashboard.
+
+    Public endpoints (no auth required): `POST /signup`, `POST /login`,
+    `GET /health`, `GET /v1/rails`.
+
+    ## Idempotency
+
+    Money-moving endpoints (`/transactions`, `/onramp`) honor an
+    `idempotency_key` body field. Repeated calls with the same
+    `(tenant, idempotency_key)` return the prior result instead of
+    re-charging.
+
+    ## Webhooks
+
+    Customers register endpoints via `/v1/webhook-endpoints` and receive
+    HMAC-SHA256-signed POSTs for each subscribed event type. See the
+    webhook delivery section for the full event catalog.
+  version: "1.0.0"
+  contact:
+    name: Atara
+    url: https://atara.xyz
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.staging.atara.xyz
+    description: Staging
+  - url: https://api.atara.xyz
+    description: Production
+
+tags:
+  - name: System
+    description: Health checks + rail catalog
+  - name: Auth
+    description: Sign up, log in, manage API keys
+  - name: Wallets
+    description: Dual-rail wallet groups + their constituent wallets
+  - name: Transactions
+    description: Cross-rail transfers + smart routing
+  - name: Onramp
+    description: Fiat → stablecoin orders
+  - name: Session Keys
+    description: AI Agent delegated signers with chain-enforced limits
+  - name: Limits
+    description: Tenant-level spending policy + violation audit log
+  - name: Webhooks
+    description: Outbound event delivery endpoints
+
+# ──────────────────────────────────────────────────────────────────────
+# Security
+# ──────────────────────────────────────────────────────────────────────
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Either an Atara API key (`sk_test_…` / `sk_live_…`) or a dashboard
+        session JWT. The server inspects the prefix and routes accordingly.
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Reusable error shape
+  # ──────────────────────────────────────────────────────────────────────
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "invalid email or password"
+
+    # ────────────────────────────────────────────────────────────────────
+    # Auth + signup
+    # ────────────────────────────────────────────────────────────────────
+    SignupRequest:
+      type: object
+      required: [company_name, email, password]
+      properties:
+        company_name:
+          type: string
+          maxLength: 100
+          example: "AI-Tutor Inc"
+        email:
+          type: string
+          format: email
+          example: "cto@ai-tutor.com"
+        password:
+          type: string
+          minLength: 12
+          format: password
+          example: "correct horse battery staple"
+
+    SignupResponse:
+      type: object
+      required: [tenant, user, api_keys]
+      properties:
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+        user:
+          $ref: '#/components/schemas/User'
+        api_keys:
+          type: object
+          required: [test, live]
+          properties:
+            test:
+              $ref: '#/components/schemas/MintedAPIKey'
+            live:
+              $ref: '#/components/schemas/MintedAPIKey'
+        _notice:
+          type: string
+          description: |
+            Reminder to persist the raw `key` values immediately.
+            They cannot be retrieved later.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    LoginResponse:
+      type: object
+      required: [session_token, expires_at, user, tenant_id]
+      properties:
+        session_token:
+          type: string
+          description: HS256-signed JWT. Pass as `Authorization Bearer`.
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix timestamp at which the token expires.
+        user:
+          $ref: '#/components/schemas/User'
+        tenant_id:
+          type: string
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, example: "tn_01J9K…" }
+        name: { type: string }
+        primary_email: { type: string }
+        plan:
+          type: string
+          enum: [free, starter, growth, enterprise, custom]
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        role:
+          type: string
+          enum: [owner, admin, developer, finance, viewer]
+
+    MintedAPIKey:
+      type: object
+      description: |
+        The shape returned at creation only. List/get responses omit `key`
+        and show only `prefix`.
+      properties:
+        id: { type: string, example: "ak_01J9K…" }
+        key:
+          type: string
+          description: Raw secret — ONE-TIME.
+          example: "sk_test_aB3dE7fGhJ2kL4mN5pQ8rS9tU0vW1xY2-_zA"
+        prefix:
+          type: string
+          example: "sk_test_aB3dE7fGhJ2k"
+
+# ──────────────────────────────────────────────────────────────────────
+# Paths
+# ──────────────────────────────────────────────────────────────────────
+paths:
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Health check + registered rails
+      security: []          # public
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  rails:
+                    type: array
+                    items: { type: string }
+                    example: [crossmint, tempo]
+
+  /v1/rails:
+    get:
+      tags: [System]
+      operationId: listRails
+      summary: List registered payment rails
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rails:
+                    type: array
+                    items: { type: string }
+
+  /signup:
+    post:
+      tags: [Auth]
+      operationId: signup
+      summary: Create a tenant, owner user, and default test+live keys
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignupResponse' }
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: An account with this email already exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Exchange email + password for a session JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401':
+          description: invalid email or password
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }

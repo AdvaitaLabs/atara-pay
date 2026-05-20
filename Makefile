@@ -51,3 +51,16 @@ test:
 lint:
 	go vet ./...
 	@diff -u <(echo -n) <(gofmt -d ./)
+
+# OpenAPI validation. Uses the redocly CLI via npx (no global install).
+# Run from the repo root.
+.PHONY: openapi-lint
+openapi-lint:
+	npx --yes @redocly/cli@latest lint api/v1/openapi.yaml
+
+# Render a static HTML docs site to bin/docs.html for local preview.
+.PHONY: openapi-docs
+openapi-docs:
+	@mkdir -p bin
+	npx --yes @redocly/cli@latest build-docs api/v1/openapi.yaml -o bin/docs.html
+	@echo "docs → bin/docs.html"
