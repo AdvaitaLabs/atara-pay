@@ -6,6 +6,8 @@ package sqlcgen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -19,6 +21,13 @@ type Querier interface {
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
 	// Users are the humans logging into the dashboard. Always tenant-scoped.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// One wallet = one on-chain account on one rail (CrossMint / Tempo /
+	// Loka-LN). Wallets belong to exactly one wallet_group via group_id.
+	CreateWallet(ctx context.Context, arg CreateWalletParams) (Wallet, error)
+	// Wallet groups bundle a logical "owner" (user / agent / merchant / treasury)
+	// and the per-rail wallets that belong to it. One group typically holds
+	// 2-3 wallets: one CrossMint, one Tempo, eventually one Loka-LN.
+	CreateWalletGroup(ctx context.Context, arg CreateWalletGroupParams) (WalletGroup, error)
 	// Hot path on every API request. The index on key_hash makes this O(1).
 	// Returns the key only if it has not been revoked.
 	GetAPIKeyByHash(ctx context.Context, keyHash []byte) (ApiKey, error)
@@ -31,18 +40,54 @@ type Querier interface {
 	// Login flow: email + tenant_id is the unique pair.
 	GetUserByEmailInTenant(ctx context.Context, arg GetUserByEmailInTenantParams) (User, error)
 	GetUserByID(ctx context.Context, id string) (User, error)
+	// Reverse lookup for incoming-transfer webhooks. The address index is
+	// partial on status='active' so deleted wallets don't clutter it.
+	GetWalletByAddress(ctx context.Context, address string) (Wallet, error)
+	// Hot path: when /v1/transactions or /v1/onramp resolves a group to a
+	// specific rail's wallet, this query is what runs. The
+	// (group_id, rail, chain) UNIQUE index makes it O(1).
+	GetWalletByGroupAndRail(ctx context.Context, arg GetWalletByGroupAndRailParams) (Wallet, error)
+	GetWalletByID(ctx context.Context, id string) (Wallet, error)
+	// Reverse lookup for provider webhooks that hand us a CrossMint cm_xxx
+	// or similar opaque id.
+	GetWalletByProviderLocator(ctx context.Context, arg GetWalletByProviderLocatorParams) (Wallet, error)
+	GetWalletGroupByID(ctx context.Context, id string) (WalletGroup, error)
+	// The lookup the dual-create endpoint needs to honor idempotency: if the
+	// customer POSTs /v1/wallet-groups twice with the same owner_ref, we
+	// return the existing group instead of failing.
+	GetWalletGroupByOwnerRef(ctx context.Context, arg GetWalletGroupByOwnerRefParams) (WalletGroup, error)
 	// Dashboard listing. Includes revoked keys so customers can audit.
 	ListAPIKeysInTenant(ctx context.Context, tenantID string) ([]ApiKey, error)
 	// Used by background sweepers and the admin console.
 	ListActiveTenants(ctx context.Context, arg ListActiveTenantsParams) ([]Tenant, error)
+	// All agent groups belonging to a particular user group (parent → child).
+	// Used by the dashboard to show "Alice's agents" under Alice's user group.
+	ListAgentGroupsForParent(ctx context.Context, parentGroupID pgtype.Text) ([]WalletGroup, error)
 	ListUsersInTenant(ctx context.Context, tenantID string) ([]User, error)
+	// Dashboard listing. Filter by owner_type (e.g. only show agents) is
+	// handled at the application layer.
+	ListWalletGroupsInTenant(ctx context.Context, arg ListWalletGroupsInTenantParams) ([]WalletGroup, error)
+	// Returns every wallet of a group, ordered so CrossMint comes before Tempo
+	// before Loka-LN — gives the dashboard a stable display order without
+	// per-rail logic in the frontend.
+	ListWalletsByGroup(ctx context.Context, groupID string) ([]Wallet, error)
 	MarkEmailVerified(ctx context.Context, id string) error
 	RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (ApiKey, error)
+	// Soft delete. The row stays so audit / reporting can still find it.
+	// Cascades to the wallets table via the foreign key (which then go
+	// status='deleted' through the same touch trigger).
+	SoftDeleteWalletGroup(ctx context.Context, id string) error
 	TouchAPIKeyUsage(ctx context.Context, id string) error
 	TouchUserLogin(ctx context.Context, id string) error
 	UpdateTenantPlan(ctx context.Context, arg UpdateTenantPlanParams) (Tenant, error)
 	UpdateTenantStatus(ctx context.Context, arg UpdateTenantStatusParams) (Tenant, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
+	// Used by the keystore when the master key rotates. We keep encrypted_
+	// private_key + key_version together to avoid ever decrypting with the
+	// wrong master generation.
+	UpdateWalletEncryptedKey(ctx context.Context, arg UpdateWalletEncryptedKeyParams) error
+	UpdateWalletGroupDisplayName(ctx context.Context, arg UpdateWalletGroupDisplayNameParams) (WalletGroup, error)
+	UpdateWalletStatus(ctx context.Context, arg UpdateWalletStatusParams) (Wallet, error)
 }
 
 var _ Querier = (*Queries)(nil)
