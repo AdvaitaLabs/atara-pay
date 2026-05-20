@@ -59,11 +59,12 @@ type Server struct {
 	app    *fiber.App
 	router *router.Router
 
-	pool             *pgxpool.Pool
-	authHandlers     *handlers.Auth
-	wgHandlers       *handlers.WalletGroups
-	limitsHandlers   *handlers.Limits
+	pool               *pgxpool.Pool
+	authHandlers       *handlers.Auth
+	wgHandlers         *handlers.WalletGroups
+	limitsHandlers     *handlers.Limits
 	sessionKeyHandlers *handlers.SessionKeys
+	webhookHandlers    *handlers.Webhooks
 	// queries is the sqlcgen.*Queries the middleware needs. We re-use the
 	// queries built inside handlers.Auth to avoid two duplicate caches.
 	queries    middleware.Queries
@@ -114,6 +115,9 @@ func New(d Deps) *Server {
 			skSvc := sessionkey.New(d.Pool, d.Keystore)
 			s.sessionKeyHandlers = handlers.NewSessionKeys(d.Pool, skSvc)
 		}
+
+		// Webhook endpoint CRUD. No external deps — just the pool.
+		s.webhookHandlers = handlers.NewWebhooks(d.Pool)
 	}
 
 	s.routes()
@@ -164,6 +168,16 @@ func (s *Server) routes() {
 		v1.Get("/tenants/me/limits", s.limitsHandlers.GetTenantLimits)
 		v1.Put("/tenants/me/limits", s.limitsHandlers.UpdateTenantLimits)
 		v1.Get("/tenants/me/limits/violations", s.limitsHandlers.ListViolations)
+	}
+
+	// Webhook endpoint management.
+	if s.webhookHandlers != nil {
+		v1.Post("/webhook-endpoints", s.webhookHandlers.Create)
+		v1.Get("/webhook-endpoints", s.webhookHandlers.List)
+		v1.Get("/webhook-endpoints/:id", s.webhookHandlers.Get)
+		v1.Patch("/webhook-endpoints/:id", s.webhookHandlers.Update)
+		v1.Post("/webhook-endpoints/:id/rotate-secret", s.webhookHandlers.RotateSecret)
+		v1.Delete("/webhook-endpoints/:id", s.webhookHandlers.Delete)
 	}
 
 	// Rail-backed routes (unchanged from MVP).

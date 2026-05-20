@@ -279,33 +279,38 @@ func (q *Queries) TouchWebhookEndpointSuccess(ctx context.Context, id string) er
 
 const updateWebhookEndpoint = `-- name: UpdateWebhookEndpoint :one
 UPDATE webhook_endpoints
-SET url               = COALESCE($2, url),
-    subscribed_events = COALESCE($3, subscribed_events),
-    description       = COALESCE($4, description),
-    status            = COALESCE($5, status)
-WHERE id = $1
+SET url               = COALESCE($1::text,       url),
+    subscribed_events = COALESCE($2::jsonb, subscribed_events),
+    description       = COALESCE($3::text, description),
+    status            = COALESCE($4::text,     status)
+WHERE id = $5
 RETURNING id, tenant_id, url, secret, secret_version, subscribed_events, status, description, last_success_at, last_failure_at, consecutive_failures, metadata, created_at, updated_at
 `
 
 type UpdateWebhookEndpointParams struct {
-	ID               string      `json:"id"`
-	Url              string      `json:"url"`
+	Url              pgtype.Text `json:"url"`
 	SubscribedEvents []byte      `json:"subscribed_events"`
 	Description      pgtype.Text `json:"description"`
-	Status           string      `json:"status"`
+	Status           pgtype.Text `json:"status"`
+	ID               string      `json:"id"`
 }
 
 // Mutable surface: URL, subscribed_events, description, status. The
 // secret is rotated via RotateWebhookEndpointSecret only — keeping the
 // updates separate so a tenant can't accidentally race a URL change with
 // a secret rotation in the same call.
+//
+// sqlc.narg() forces each argument to be a nullable pgtype so PATCH-style
+// semantics (omit field = no change) work cleanly. Columns that are NOT
+// NULL in the table (url, status) would otherwise be inferred as Go
+// string and lose their COALESCE behavior.
 func (q *Queries) UpdateWebhookEndpoint(ctx context.Context, arg UpdateWebhookEndpointParams) (WebhookEndpoint, error) {
 	row := q.db.QueryRow(ctx, updateWebhookEndpoint,
-		arg.ID,
 		arg.Url,
 		arg.SubscribedEvents,
 		arg.Description,
 		arg.Status,
+		arg.ID,
 	)
 	var i WebhookEndpoint
 	err := row.Scan(

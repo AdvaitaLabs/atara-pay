@@ -33,12 +33,17 @@ WHERE tenant_id = $1 AND status = 'active';
 -- secret is rotated via RotateWebhookEndpointSecret only — keeping the
 -- updates separate so a tenant can't accidentally race a URL change with
 -- a secret rotation in the same call.
+--
+-- sqlc.narg() forces each argument to be a nullable pgtype so PATCH-style
+-- semantics (omit field = no change) work cleanly. Columns that are NOT
+-- NULL in the table (url, status) would otherwise be inferred as Go
+-- string and lose their COALESCE behavior.
 UPDATE webhook_endpoints
-SET url               = COALESCE($2, url),
-    subscribed_events = COALESCE($3, subscribed_events),
-    description       = COALESCE($4, description),
-    status            = COALESCE($5, status)
-WHERE id = $1
+SET url               = COALESCE(sqlc.narg('url')::text,       url),
+    subscribed_events = COALESCE(sqlc.narg('subscribed_events')::jsonb, subscribed_events),
+    description       = COALESCE(sqlc.narg('description')::text, description),
+    status            = COALESCE(sqlc.narg('status')::text,     status)
+WHERE id = sqlc.arg('id')
 RETURNING *;
 
 -- name: RotateWebhookEndpointSecret :one

@@ -205,6 +205,11 @@ type Querier interface {
 	// secret is rotated via RotateWebhookEndpointSecret only — keeping the
 	// updates separate so a tenant can't accidentally race a URL change with
 	// a secret rotation in the same call.
+	//
+	// sqlc.narg() forces each argument to be a nullable pgtype so PATCH-style
+	// semantics (omit field = no change) work cleanly. Columns that are NOT
+	// NULL in the table (url, status) would otherwise be inferred as Go
+	// string and lose their COALESCE behavior.
 	UpdateWebhookEndpoint(ctx context.Context, arg UpdateWebhookEndpointParams) (WebhookEndpoint, error)
 	// Durable mirror of the hot-path Redis counters. Redis is the canonical
 	// source for live values; PG is the persisted copy flushed periodically
