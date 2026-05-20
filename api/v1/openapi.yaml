@@ -370,6 +370,245 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Violation' }
 
+    # ────────────────────────────────────────────────────────────────────
+    # Wallet groups (dual-rail by default)
+    # ────────────────────────────────────────────────────────────────────
+    Rail:
+      type: string
+      enum: [crossmint, tempo, loka-ln]
+      description: |
+        Underlying payment provider for a wallet. Each wallet group has
+        one wallet per rail (CrossMint + Tempo today; Lightning planned).
+
+    Custody:
+      type: string
+      enum: [platform, user, mpc]
+      description: |
+        Who holds the private key.
+        - `platform`: Atara holds it (default; encrypted in DB or by the
+          provider — see rail-specific docs).
+        - `user`: client supplies their own address; Atara never sees the
+          key.
+        - `mpc`: multi-party computation, neither side has the full key
+          (planned).
+
+    OwnerType:
+      type: string
+      enum: [user, agent, merchant, treasury]
+
+    Owner:
+      type: object
+      required: [type, ref]
+      properties:
+        type: { $ref: '#/components/schemas/OwnerType' }
+        ref:
+          type: string
+          maxLength: 200
+          example: "user_alice_123"
+          description: |
+            The customer's external identifier. Atara never assigns
+            meaning to it — repeated requests with the same `ref` are
+            idempotent (you'll get the same group back).
+
+    Wallet:
+      type: object
+      description: |
+        One on-chain account on one rail. Wallets belong to exactly one
+        wallet_group. encrypted_private_key NEVER appears in API
+        responses.
+      required: [id, rail, chain, address, custody, status]
+      properties:
+        id: { type: string, example: "wlt_01J9K…" }
+        rail:    { $ref: '#/components/schemas/Rail' }
+        chain:   { type: string, example: "base" }
+        address: { type: string, example: "0xA1B2…" }
+        custody: { $ref: '#/components/schemas/Custody' }
+        provider_locator:
+          type: string
+          description: Rail-side identifier (CrossMint `cm_xxx`; Tempo = address).
+        status:
+          type: string
+          enum: [active, frozen, deleted]
+
+    WalletGroup:
+      type: object
+      required: [id, tenant_id, owner_type, owner_ref, custody, wallets]
+      properties:
+        id: { type: string, example: "wg_01J9K…" }
+        tenant_id: { type: string }
+        owner_type: { $ref: '#/components/schemas/OwnerType' }
+        owner_ref:  { type: string }
+        parent_group_id:
+          type: string
+          description: Only set when owner_type=agent; points at the
+                       user group that owns the agent.
+        custody: { $ref: '#/components/schemas/Custody' }
+        display_name: { type: string }
+        wallets:
+          type: array
+          items: { $ref: '#/components/schemas/Wallet' }
+          minItems: 0
+        created_at: { type: string, format: date-time }
+        _reused:
+          type: boolean
+          description: |
+            true when this group already existed (idempotency match by
+            owner_ref) and no new wallets were minted.
+
+    CreateGroupRequest:
+      type: object
+      required: [owner]
+      properties:
+        owner: { $ref: '#/components/schemas/Owner' }
+        parent_group_id:
+          type: string
+          description: Required when owner.type=agent.
+        display_name: { type: string }
+        crossmint_chain:
+          type: string
+          description: Optional CrossMint chain override. Defaults to "base".
+          default: base
+          example: base
+
+    ListGroupsResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WalletGroup' }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Transactions
+    # ────────────────────────────────────────────────────────────────────
+    Asset:
+      type: string
+      description: |
+        Token symbol in uppercase. `USDC` and `USDT` route to CrossMint by
+        default; `pathUSD` routes to Tempo. Override via `rail` on the
+        request.
+      example: USDC
+
+    SendTransactionRequest:
+      type: object
+      required: [to, amount, asset]
+      properties:
+        to:
+          type: string
+          description: |
+            Destination — either an on-chain address (0x…) or a merchant
+            identifier (`merchant:openai`) the platform resolves
+            internally.
+          example: "0xC3D4…"
+        amount:
+          type: string
+          example: "10"
+        asset: { $ref: '#/components/schemas/Asset' }
+        rail:
+          type: string
+          enum: [crossmint, tempo]
+          description: |
+            Override the default asset → rail mapping. Required when the
+            asset has no default (rare).
+        signer_id:
+          type: string
+          description: |
+            ID of an active session key on the wallet. When set, policy
+            resolution prefers that session key's scope; the audit row's
+            `session_key_id` is populated for traceability.
+        idempotency_key:
+          type: string
+          description: |
+            Customer-supplied key making the request safely retryable.
+            Re-using a `(tenant, idempotency_key)` returns the prior
+            transaction instead of re-charging.
+
+    TxStatus:
+      type: string
+      enum: [pending, broadcast, succeeded, failed, cancelled]
+
+    Transaction:
+      type: object
+      required: [id, rail, chain, status, from, to, amount, asset]
+      properties:
+        id:     { type: string, example: "tx_01J9K…" }
+        rail:   { $ref: '#/components/schemas/Rail' }
+        chain:  { type: string }
+        status: { $ref: '#/components/schemas/TxStatus' }
+        from:   { type: string, description: "Wallet id" }
+        to:     { type: string }
+        amount: { type: string }
+        asset:  { $ref: '#/components/schemas/Asset' }
+        tx_hash: { type: string }
+        provider_tx_id: { type: string }
+        created_at: { type: string, format: date-time }
+
+    TransactionLimitError:
+      type: object
+      description: |
+        Returned with HTTP 429 when limits.Service denies the transfer.
+        The body carries the structured violation so customers can react
+        precisely (alert, swap signer, escalate tier).
+      required: [error, violation, policy_id]
+      properties:
+        error:     { type: string, example: "spending limit exceeded" }
+        policy_id: { type: string }
+        violation:
+          type: object
+          properties:
+            type:         { type: string, example: "daily_exceeded" }
+            limit_value:  { type: string, example: "20" }
+            current_used: { type: string, example: "23.5" }
+            message:      { type: string }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Onramp
+    # ────────────────────────────────────────────────────────────────────
+    FiatAmount:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:   { type: string, example: "100" }
+        currency:
+          type: string
+          description: ISO 4217.
+          example: USD
+
+    CreateOnrampRequest:
+      type: object
+      required: [fiat, asset]
+      properties:
+        fiat:  { $ref: '#/components/schemas/FiatAmount' }
+        asset: { $ref: '#/components/schemas/Asset' }
+        chain: { type: string, example: "base" }
+        idempotency_key: { type: string }
+
+    OnrampStatus:
+      type: string
+      enum: [pending, checkout_opened, paid, delivering, completed, failed, expired]
+
+    OnrampOrder:
+      type: object
+      required: [id, status, provider, wallet_id, fiat_amount, fiat_currency, asset, chain]
+      properties:
+        id:        { type: string, example: "ord_01J9K…" }
+        status:    { $ref: '#/components/schemas/OnrampStatus' }
+        provider:  { type: string, example: "crossmint" }
+        wallet_id: { type: string }
+        fiat_amount:   { type: string }
+        fiat_currency: { type: string }
+        asset:    { $ref: '#/components/schemas/Asset' }
+        chain:    { type: string }
+        checkout_url:
+          type: string
+          format: uri
+          description: |
+            Hosted checkout URL the client opens (iframe / new window) for
+            the end-user to enter their card details. Expires after ~30m.
+        provider_order_id: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
 # ──────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────
@@ -601,3 +840,171 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ListViolationsResponse' }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Wallet groups
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/wallet-groups:
+    post:
+      tags: [Wallets]
+      operationId: createWalletGroup
+      summary: Provision a dual-rail wallet group (CrossMint + Tempo)
+      description: |
+        Atomically creates one wallet_group plus one wallet per configured
+        rail. CrossMint and Tempo are both created today; the Tempo
+        wallet's master key is AES-256-GCM-encrypted at rest.
+
+        **Idempotent.** Repeating the call with the same
+        `(tenant, owner.ref)` returns the existing group untouched with
+        `_reused: true`. Up to one CrossMint orphan can occur if two
+        clients race past the idempotency lookup — a sweeper reconciles
+        from externalUserId.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGroupRequest' }
+      responses:
+        '200':
+          description: Existing group returned (idempotent re-call).
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WalletGroup' } }
+        '201':
+          description: Created
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WalletGroup' } }
+        '400':
+          description: Invalid input (bad owner.type, missing ref, agent without parent_group_id…)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '502':
+          description: Upstream rail (CrossMint) returned an error
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    get:
+      tags: [Wallets]
+      operationId: listWalletGroups
+      summary: Paginated list of the tenant's wallet groups
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/ListGroupsResponse' } }
+
+  /v1/wallet-groups/{id}:
+    get:
+      tags: [Wallets]
+      operationId: getWalletGroup
+      summary: Fetch a wallet group + its wallets
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/WalletGroup' } }
+        '404':
+          description: Not found (or belongs to another tenant)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/wallet-groups/{id}/transactions:
+    post:
+      tags: [Transactions]
+      operationId: sendTransaction
+      summary: Smart-routed transfer
+      description: |
+        Picks the rail by asset (`USDC` / `USDT` → CrossMint;
+        `pathUSD` → Tempo) unless `rail` overrides. Runs the limit gate
+        BEFORE the rail call — a denied attempt costs zero gas. When
+        `signer_id` is supplied, policy resolution prefers the
+        session-key-scoped policy (typically tighter caps).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendTransactionRequest' }
+      responses:
+        '201':
+          description: Transaction broadcast (status may be pending/broadcast/succeeded)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Transaction' } }
+        '400':
+          description: Invalid input
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '403':
+          description: signer_id rejected (wrong tenant, wrong wallet, revoked, expired)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '422':
+          description: Group has no active wallet on the routed rail
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '429':
+          description: Spending limit exceeded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionLimitError' }
+        '502':
+          description: Upstream rail error
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/wallet-groups/{id}/onramp:
+    post:
+      tags: [Onramp]
+      operationId: createOnrampOrder
+      summary: Start a fiat → stablecoin order
+      description: |
+        Always routes through CrossMint — Tempo has no fiat rail today.
+        Returns a hosted checkout URL the client embeds in an iframe.
+        Order auto-expires ~30 minutes after creation if not paid.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOnrampRequest' }
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/OnrampOrder' } }
+        '400':
+          description: Invalid input
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '422':
+          description: Group has no active CrossMint wallet (onramp unavailable)
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '502':
+          description: Upstream rail error
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
