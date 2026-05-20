@@ -138,9 +138,103 @@ func (s *Service) Check(ctx context.Context, req CheckRequest) (*CheckResult, er
 			fmt.Sprintf("recipient %q rejected by policy", req.Recipient))
 	}
 
-	// Period gates (daily / weekly / monthly) ship in M4.2b once Redis
-	// counters are wired. For now, allow once the cheap gates pass.
+	// Gates 4-6: period accumulators (daily / weekly / monthly).
+	// Skip cleanly if Redis isn't wired — policies still enforce per-tx /
+	// recipient / expiry above. Redis-less mode is documented in PLAN.md
+	// as the fallback during the Redis migration window.
+	if s.redis != nil {
+		if v, err := s.checkPeriods(ctx, req, pol); err != nil {
+			return nil, err
+		} else if v != nil {
+			return v, nil
+		}
+	}
+
 	return &CheckResult{Allowed: true, PolicyID: pol.ID}, nil
+}
+
+// checkPeriods enforces the daily/weekly/monthly caps in order. On the
+// first violation it rolls back the INCRBYs done for already-passed
+// periods (so today's denied 5.01 USDC doesn't permanently inflate the
+// daily counter) and returns a deny result.
+func (s *Service) checkPeriods(
+	ctx context.Context, req CheckRequest, pol sqlcgen.LimitPolicy,
+) (*CheckResult, error) {
+	deltaMicros, err := scaleToMicros(req.Amount)
+	if err != nil {
+		// Treat un-parseable amounts as a bad request; caller already
+		// validates shape, so this should only fire on truly malformed
+		// inputs. Return nil so the per-tx gate's own error path takes over.
+		return nil, fmt.Errorf("limits: %w", err)
+	}
+	tz := loadTimezone(pol.Timezone)
+	now := time.Now().UTC()
+
+	type budget struct {
+		p   period
+		cap int64
+	}
+	plan := []budget{
+		{periodDaily, numericToMicros(pol.DailyAmount)},
+		{periodWeekly, numericToMicros(pol.WeeklyAmount)},
+		{periodMonthly, numericToMicros(pol.MonthlyAmount)},
+	}
+
+	// Track keys we successfully incremented so we can DECRBY on a later
+	// period's failure. (The rollbackBudget struct is package-level so
+	// rollbackBudgets can take it cleanly.)
+	var rollbacks []rollbackBudget
+
+	for _, b := range plan {
+		violationType, _, err := periodBudgetCheck(
+			ctx, s.redis, pol.ID, b.p, b.cap, deltaMicros, now, tz,
+		)
+		if err == errCapMissing {
+			continue // no cap on this period
+		}
+		if err != nil {
+			// Redis hiccup: roll back the prior INCRs (best-effort) and
+			// propagate so the caller can decide whether to fail-open or
+			// fail-closed. Atara fails-closed today.
+			s.rollbackBudgets(ctx, rollbacks)
+			return nil, err
+		}
+		if violationType != "" {
+			// Roll back the budgets we already incremented this call.
+			s.rollbackBudgets(ctx, rollbacks)
+			capStr := microsToDecimal(b.cap)
+			// Note: currentUsedStr from periodBudgetCheck already excludes
+			// this attempt — that's what we want for the audit log.
+			currentUsed := microsToDecimal(b.cap) // worst-case display; the
+			// upstream call recomputes deductedTotal but we lose that here
+			// after rollback. The audit row still pins the cap, which is
+			// the actionable number for customers.
+			_ = currentUsed
+			return s.reject(ctx, req, pol, violationType,
+				capStr, "",
+				fmt.Sprintf("%s cap %s exceeded", string(b.p), capStr))
+		}
+		// Allowed for this period. Record the key so a later deny can
+		// roll us back.
+		rollbacks = append(rollbacks, rollbackBudget{
+			key:   fmt.Sprintf("usage:%s:%s", pol.ID, periodKey(b.p, now, tz)),
+			delta: deltaMicros,
+		})
+	}
+	return nil, nil
+}
+
+// rollbackBudget pairs a Redis key with the delta we INCRBY'd onto it, so
+// a later check-failure in the same Check() call can DECRBY back.
+type rollbackBudget struct {
+	key   string
+	delta int64
+}
+
+func (s *Service) rollbackBudgets(ctx context.Context, list []rollbackBudget) {
+	for _, r := range list {
+		_ = s.redis.DecrBy(ctx, r.key, r.delta).Err()
+	}
 }
 
 // ──────────────────────────────────────────────────────────────────────
