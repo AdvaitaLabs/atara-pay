@@ -16,6 +16,7 @@ import (
 	"github.com/atara-xyz/atara-pay/internal/server"
 	"github.com/atara-xyz/atara-pay/internal/sessionkey"
 	"github.com/atara-xyz/atara-pay/internal/types"
+	"github.com/atara-xyz/atara-pay/internal/webhooks"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -166,6 +167,15 @@ func main() {
 		defer cancelRotator()
 		rotator := sessionkey.NewRotator(pool, 0, 0)
 		go rotator.Run(rotatorCtx)
+	}
+
+	// Webhook delivery worker. Drains webhook_events queue with
+	// HMAC-signed HTTP POST + exponential-backoff retry.
+	if pool != nil {
+		whCtx, cancelWebhook := context.WithCancel(ctx)
+		defer cancelWebhook()
+		worker := webhooks.NewWorker(pool)
+		go worker.Run(whCtx)
 	}
 
 	addr := ":" + cfg.Port
