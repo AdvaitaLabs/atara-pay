@@ -166,7 +166,18 @@ func main() {
 		Redis:              rdb,
 		Metrics:            metricsReg,
 		RateLimitPerMinute: 600, // sensible default; M13.2 makes it per-tier
+		Environment:        cfg.Environment,
 	})
+
+	// Loud sandbox banner. Production stays silent (operators don't need
+	// extra noise); anything else prints a giant marker so a misconfigured
+	// staging deploy can't quietly accept "live" traffic.
+	if cfg.Environment != "production" {
+		log.Printf("[atara-pay] ┌──────────────────────────────────────────┐")
+		log.Printf("[atara-pay] │  SANDBOX — environment=%-17s │", cfg.Environment)
+		log.Printf("[atara-pay] │  NOT for real money. Test keys only.     │")
+		log.Printf("[atara-pay] └──────────────────────────────────────────┘")
+	}
 
 	// Session-key background rotator. Sweeps expired rows + logs rotation
 	// backlog every minute. Webhook handoff lands in M7.

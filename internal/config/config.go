@@ -30,6 +30,12 @@ type Config struct {
 	// Routing
 	DefaultRail string
 	RoutingMode string
+
+	// Environment is the gateway's deployment ring. One of: "production",
+	// "staging", "development". Surfaces in /health and every webhook so
+	// integrators can fail-closed when a test key talks to prod (or vice
+	// versa). Defaults to "development" when unset.
+	Environment string
 }
 
 // Load reads config from env, applying sensible defaults.
@@ -50,6 +56,7 @@ func Load() (*Config, error) {
 		TempoChainID:      chainID,
 		DefaultRail:       getEnv("ATARA_PAY_DEFAULT_RAIL", "crossmint"),
 		RoutingMode:       getEnv("ATARA_PAY_ROUTING_MODE", "smart"),
+		Environment:       normalizeEnv(getEnv("ATARA_PAY_ENVIRONMENT", "development")),
 	}
 
 	if cfg.CrossMintAPIKey == "" && cfg.TempoRPCURL == "" {
@@ -71,6 +78,20 @@ func parseIntEnv(key string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return n, nil
+}
+
+// normalizeEnv coerces common aliases ("prod"→"production", "test"/"sandbox"
+// →"staging") so /health and webhook payloads only ever emit one of three
+// canonical values.
+func normalizeEnv(v string) string {
+	switch v {
+	case "prod", "production", "live":
+		return "production"
+	case "staging", "stage", "sandbox", "test", "testnet":
+		return "staging"
+	default:
+		return "development"
+	}
 }
 
 func getEnv(key, fallback string) string {

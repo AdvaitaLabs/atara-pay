@@ -36,8 +36,15 @@ migrate-new:
 	migrate create -ext sql -dir $(MIGRATIONS_DIR) -seq $(N)
 
 .PHONY: build
-build:
+build: build-server build-cli
+
+.PHONY: build-server
+build-server:
 	go build -o bin/atara-pay ./cmd/atara-pay
+
+.PHONY: build-cli
+build-cli:
+	go build -o bin/atara ./cmd/atara
 
 .PHONY: run
 run:

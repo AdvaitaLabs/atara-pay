@@ -64,6 +64,11 @@ type Deps struct {
 	// middleware is not mounted). Redis must be set for the limit to
 	// actually enforce; otherwise the middleware passes through.
 	RateLimitPerMinute int
+
+	// Environment is one of "production" | "staging" | "development". Empty
+	// is treated as "development". Surfaces in /health responses and in
+	// every webhook payload so integrators can fail-closed on env mismatch.
+	Environment string
 }
 
 // Server is the HTTP entry point.
@@ -87,6 +92,7 @@ type Server struct {
 
 	metrics            *metrics.Registry
 	rateLimitPerMinute int
+	environment        string
 }
 
 // New constructs a Server from its deps. Auth routes are mounted only when
@@ -100,6 +106,10 @@ func New(d Deps) *Server {
 		ErrorHandler:          errorHandler,
 	})
 
+	env := d.Environment
+	if env == "" {
+		env = "development"
+	}
 	s := &Server{
 		app:                app,
 		router:             d.Router,
@@ -108,6 +118,7 @@ func New(d Deps) *Server {
 		signingKey:         d.SessionSigningKey,
 		metrics:            d.Metrics,
 		rateLimitPerMinute: d.RateLimitPerMinute,
+		environment:        env,
 	}
 
 	if d.Pool != nil {
@@ -174,6 +185,15 @@ func New(d Deps) *Server {
 }
 
 func (s *Server) routes() {
+	// Stamp every response with the deployment environment. Integrators
+	// can fail-closed when a test key hits prod (or vice versa) without
+	// parsing /health. Set before any other middleware so even 401s and
+	// rate-limited 429s carry it.
+	s.app.Use(func(c *fiber.Ctx) error {
+		c.Set("x-atara-environment", s.environment)
+		return c.Next()
+	})
+
 	// Observability middleware runs first so it captures every request,
 	// including the 401s the auth middleware bounces. Nil registry → no-op.
 	s.app.Use(middleware.Metrics(s.metrics))
@@ -281,8 +301,9 @@ func (s *Server) Listen(addr string) error {
 
 func (s *Server) health(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
-		"status": "ok",
-		"rails":  s.router.Registered(),
+		"status":      "ok",
+		"environment": s.environment,
+		"rails":       s.router.Registered(),
 	})
 }
 
