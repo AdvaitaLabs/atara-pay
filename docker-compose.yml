@@ -1,0 +1,43 @@
+# Local + CI integration-test stack.
+#
+#   docker compose -f docker-compose.yml up -d            # boot pg + redis
+#   make migrate-up                                       # apply schema
+#   DATABASE_URL=... REDIS_URL=... go test ./tests/integration -count=1
+#   docker compose down -v                                 # nuke volumes
+#
+# Volumes are named so successive runs keep data; pass `-v` to wipe.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: atara_pg
+    environment:
+      POSTGRES_USER: atara
+      POSTGRES_PASSWORD: atara
+      POSTGRES_DB: atara_pay
+    ports:
+      - "5432:5432"
+    volumes:
+      - atara_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atara -d atara_pay"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: atara_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - atara_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  atara_pg_data:
+  atara_redis_data:
