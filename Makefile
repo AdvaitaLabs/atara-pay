@@ -44,7 +44,8 @@ build-server:
 
 .PHONY: build-cli
 build-cli:
-	go build -o bin/atara ./cmd/atara
+	go build -ldflags "-X github.com/atara-xyz/atara-pay/cmd/atara/cli.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" \
+		-o bin/atara ./cmd/atara
 
 .PHONY: run
 run:

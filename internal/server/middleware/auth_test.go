@@ -156,3 +156,45 @@ func TestAuth_EnvironmentMismatch(t *testing.T) {
 		t.Errorf("env mismatch should 401, got %d", resp.StatusCode)
 	}
 }
+
+// buildAppForEnv mirrors buildApp but uses APIKeyAuthForEnvironment so we can
+// exercise the gateway-env gate (production rejects test keys, etc.).
+func buildAppForEnv(q Queries, gatewayEnv string) *fiber.App {
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	app.Use(APIKeyAuthForEnvironment(q, gatewayEnv))
+	app.Get("/ok", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"env": Environment(c)})
+	})
+	return app
+}
+
+func TestAuth_GatewayEnvGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		gatewayEnv string
+		keyEnv     string
+		wantStatus int
+	}{
+		{"test-key-on-prod-rejected", "production", "test", 401},
+		{"live-key-on-prod-ok", "production", "live", 200},
+		{"live-key-on-staging-rejected", "staging", "live", 401},
+		{"test-key-on-staging-ok", "staging", "test", 200},
+		{"empty-gateway-env-disables-gate", "", "test", 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeQueries{keys: map[string]sqlcgen.ApiKey{}}
+			raw := mustMintAndStore(t, f, tc.keyEnv, "tn_x", "ak_x")
+
+			app := buildAppForEnv(f, tc.gatewayEnv)
+			req := httptest.NewRequest("GET", "/ok", nil)
+			req.Header.Set("Authorization", "Bearer "+raw)
+			resp, _ := app.Test(req, -1)
+			if resp.StatusCode != tc.wantStatus {
+				body, _ := io.ReadAll(resp.Body)
+				t.Errorf("status=%d want=%d body=%s",
+					resp.StatusCode, tc.wantStatus, body)
+			}
+		})
+	}
+}

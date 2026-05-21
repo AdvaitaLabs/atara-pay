@@ -40,8 +40,19 @@ type Queries interface {
 
 // APIKeyAuth returns a Fiber middleware that authenticates the request via
 // the Authorization header. Pass a Queries implementation (usually the
-// sqlcgen-generated *Queries struct).
+// sqlcgen-generated *Queries struct). Does NOT cross-check the gateway
+// environment — use APIKeyAuthForEnvironment when running prod/staging.
 func APIKeyAuth(q Queries) fiber.Handler {
+	return APIKeyAuthForEnvironment(q, "")
+}
+
+// APIKeyAuthForEnvironment is APIKeyAuth plus a gateway-environment gate:
+// when gatewayEnv is "production", only "live" keys pass; for "staging" /
+// "development", only "test" keys pass. Empty disables the gate (keeps the
+// old behavior for callers that didn't opt in — and for the unit tests in
+// auth_test.go that exercise the middleware in isolation).
+func APIKeyAuthForEnvironment(q Queries, gatewayEnv string) fiber.Handler {
+	expectedKeyEnv := requiredKeyEnv(gatewayEnv)
 	return func(c *fiber.Ctx) error {
 		raw, err := bearerFromHeader(c.Get("Authorization"))
 		if err != nil {
@@ -51,6 +62,17 @@ func APIKeyAuth(q Queries) fiber.Handler {
 		env, err := auth.ParseAPIKey(raw)
 		if err != nil {
 			return unauthorized(c, "invalid api key format")
+		}
+
+		// Cheap pre-DB gate. Reject sk_live_ on staging and sk_test_ on
+		// prod before we even hash. Avoids burning a DB lookup for the
+		// most common misconfiguration ("forgot to switch keys when
+		// moving environments"), and makes the error message specific
+		// instead of a generic 401.
+		if expectedKeyEnv != "" && env != expectedKeyEnv {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "api key environment (" + env + ") does not match gateway environment",
+			})
 		}
 
 		hash := auth.HashAPIKey(raw)
@@ -98,6 +120,19 @@ func bearerFromHeader(h string) (string, error) {
 		return "", errors.New("empty token")
 	}
 	return token, nil
+}
+
+// requiredKeyEnv maps gateway environment to the api_key.environment value
+// it will accept. Empty result means "no gate".
+func requiredKeyEnv(gatewayEnv string) string {
+	switch gatewayEnv {
+	case "production":
+		return "live"
+	case "staging", "development":
+		return "test"
+	default:
+		return ""
+	}
 }
 
 func unauthorized(c *fiber.Ctx, msg string) error {

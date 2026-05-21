@@ -216,7 +216,7 @@ func (s *Server) routes() {
 	// Authenticated /v1 group.
 	v1 := s.app.Group("/v1")
 	if s.authHandlers != nil && len(s.signingKey) >= 32 {
-		v1.Use(middleware.EitherAuth(s.queries, s.signingKey))
+		v1.Use(middleware.EitherAuthForEnvironment(s.queries, s.signingKey, s.environment))
 	}
 	// Per-tenant rate limit AFTER auth so we know which tenant_id to key on.
 	// When RateLimitPerMinute is 0 or Redis is nil, the middleware is a

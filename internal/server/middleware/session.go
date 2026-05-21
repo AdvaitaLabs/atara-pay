@@ -52,7 +52,14 @@ func SessionAuth(signingKey []byte) fiber.Handler {
 // Useful for endpoints like /v1/api-keys that are reached from both the
 // customer's backend (API key) and the dashboard (session JWT).
 func EitherAuth(q Queries, signingKey []byte) fiber.Handler {
-	apiKeyMW := APIKeyAuth(q)
+	return EitherAuthForEnvironment(q, signingKey, "")
+}
+
+// EitherAuthForEnvironment is EitherAuth with the same gateway-env gate
+// as APIKeyAuthForEnvironment. Session JWTs are unaffected — dashboard
+// users live in a single environment by virtue of which gateway they hit.
+func EitherAuthForEnvironment(q Queries, signingKey []byte, gatewayEnv string) fiber.Handler {
+	apiKeyMW := APIKeyAuthForEnvironment(q, gatewayEnv)
 	sessionMW := SessionAuth(signingKey)
 	return func(c *fiber.Ctx) error {
 		raw, err := bearerFromHeader(c.Get("Authorization"))
