@@ -51,7 +51,7 @@ servers:
 
 tags:
   - name: System
-    description: Health checks + rail catalog
+    description: Health checks + rail catalog + Prometheus metrics
   - name: Auth
     description: Sign up, log in, manage API keys
   - name: Wallets
@@ -66,6 +66,10 @@ tags:
     description: Tenant-level spending policy + violation audit log
   - name: Webhooks
     description: Outbound event delivery endpoints
+  - name: Virtual Addresses
+    description: Per-customer / per-invoice deposit addresses (TIP-1022)
+  - name: Accounting
+    description: Aggregated balances and monthly statements
 
 # ──────────────────────────────────────────────────────────────────────
 # Security
@@ -837,6 +841,108 @@ components:
           type: array
           items: { $ref: '#/components/schemas/WebhookEndpoint' }
 
+    # ────────────────────────────────────────────────────────────────────
+    # Virtual addresses (TIP-1022)
+    # ────────────────────────────────────────────────────────────────────
+    VirtualAddress:
+      type: object
+      description: |
+        Deterministic per-(wallet, label) deposit address. Funds sent to
+        `address` route to the parent Tempo wallet automatically via the
+        AddressRegistry precompile.
+      required: [id, wallet_id, group_id, label, address]
+      properties:
+        id:        { type: string, example: "vaddr_01J9K…" }
+        wallet_id: { type: string }
+        group_id:  { type: string }
+        label:
+          type: string
+          maxLength: 200
+          description: |
+            Free-form customer shard. Same label → same address every
+            time (keccak256 mapped on chain).
+        address:
+          type: string
+          example: "0xVA00…"
+        registration_tx_hash:
+          type: string
+          description: Tempo tx hash that registered this label on chain.
+        created_at: { type: string, format: date-time }
+
+    CreateVirtualAddressRequest:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          maxLength: 200
+          example: "invoice-42"
+
+    ListVirtualAddressesResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/VirtualAddress' }
+
+    # ────────────────────────────────────────────────────────────────────
+    # Accounting (M9)
+    # ────────────────────────────────────────────────────────────────────
+    AssetBalanceLine:
+      type: object
+      description: |
+        One (asset, direction) row from a SUM aggregate over the
+        transactions table. Amount is a decimal string preserving full
+        NUMERIC(38,18) precision.
+      required: [asset, direction, tx_count, total_amount]
+      properties:
+        asset:        { type: string, example: "USDC" }
+        direction:
+          type: string
+          enum: [outbound, inbound, internal]
+        tx_count:     { type: integer, format: int64 }
+        total_amount: { type: string, example: "1234.56" }
+
+    GroupBalanceResponse:
+      type: object
+      required: [group_id, lines]
+      properties:
+        group_id: { type: string }
+        lines:
+          type: array
+          items: { $ref: '#/components/schemas/AssetBalanceLine' }
+
+    OnrampLine:
+      type: object
+      required: [fiat_currency, asset, order_count]
+      properties:
+        fiat_currency:    { type: string, example: "USD" }
+        asset:            { type: string, example: "USDC" }
+        order_count:      { type: integer, format: int64 }
+        fiat_total:       { type: string, example: "500" }
+        crypto_delivered: { type: string, example: "485.50" }
+
+    MonthlyStatement:
+      type: object
+      description: |
+        Aggregated per-(asset, direction) totals over a UTC half-open
+        month window plus the fiat onramp completions in the same window.
+      required: [month, window_start, window_end, transactions, onramp]
+      properties:
+        month:        { type: string, example: "2026-05" }
+        window_start: { type: string, format: date-time }
+        window_end:
+          type: string
+          format: date-time
+          description: Exclusive (matches SQL `created_at < window_end`).
+        transactions:
+          type: array
+          items: { $ref: '#/components/schemas/AssetBalanceLine' }
+        onramp:
+          type: array
+          items: { $ref: '#/components/schemas/OnrampLine' }
+
 # ──────────────────────────────────────────────────────────────────────
 # Paths
 # ──────────────────────────────────────────────────────────────────────
@@ -1522,3 +1628,165 @@ paths:
           description: Not found
           content:
             application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Virtual addresses (TIP-1022)
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/wallet-groups/{id}/virtual-addresses:
+    post:
+      tags: [Virtual Addresses]
+      operationId: createVirtualAddress
+      summary: Provision a per-customer / per-invoice deposit address
+      description: |
+        Mints a virtual address on the group's Tempo wallet. Idempotent
+        on (wallet_id, label) — repeating the call with the same label
+        returns the existing row, no new on-chain registration.
+
+        The label is hashed (keccak256) into a 32-byte slot the Tempo
+        AddressRegistry precompile uses to derive the address
+        deterministically. So `"invoice-42"` always maps to the same
+        address for a given parent wallet.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateVirtualAddressRequest' }
+      responses:
+        '200':
+          description: Already existed; returned unchanged (idempotent re-call).
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/VirtualAddress' } }
+        '201':
+          description: Newly created
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/VirtualAddress' } }
+        '400':
+          description: Invalid input
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '422':
+          description: Group has no active Tempo wallet
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+        '502':
+          description: Tempo RPC error during registration
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+    get:
+      tags: [Virtual Addresses]
+      operationId: listVirtualAddresses
+      summary: List virtual addresses for the group's Tempo wallet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+      responses:
+        '200':
+          description: OK (empty data array if no Tempo wallet in this group)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListVirtualAddressesResponse' }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Accounting (M9)
+  # ──────────────────────────────────────────────────────────────────────
+
+  /v1/wallet-groups/{id}/balance:
+    get:
+      tags: [Accounting]
+      operationId: getGroupBalance
+      summary: Sum of succeeded transfers by (asset, direction)
+      description: |
+        Live aggregate over the transactions table. Cheap for typical
+        group sizes; M9.2 will swap to a pre-materialized rollup once
+        we see tenants with millions of transfers.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/GroupBalanceResponse' } }
+        '404':
+          description: Wallet group not found
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  /v1/tenants/me/statements/{month}:
+    get:
+      tags: [Accounting]
+      operationId: getMonthlyStatement
+      summary: Aggregated transactions + onramp totals for a UTC month
+      description: |
+        `month` is `YYYY-MM`. The handler computes a half-open
+        `[start, end)` UTC window so the SQL
+        `created_at >= start AND created_at < end` matches without an
+        off-by-one at the month boundary.
+      parameters:
+        - name: month
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9]{4}-[0-9]{2}$'
+            example: "2026-05"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/MonthlyStatement' } }
+        '400':
+          description: month not in YYYY-MM
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Error' } }
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Observability (M13)
+  # ──────────────────────────────────────────────────────────────────────
+
+  /metrics:
+    get:
+      tags: [System]
+      operationId: getMetrics
+      summary: Prometheus scrape endpoint
+      security: []
+      description: |
+        Returns Prometheus text-format metrics covering HTTP traffic,
+        domain events (limit violations, webhook deliveries, session-key
+        lifecycle), and outbound rail call latency. Operators point
+        Prometheus / Grafana / OpenTelemetry collectors here.
+
+        Standard Go runtime + process collectors are included so heap,
+        gc, fds etc. land alongside the application metrics.
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP atara_pay_http_requests_total Total HTTP requests served, partitioned by method, route, status class.
+                  # TYPE atara_pay_http_requests_total counter
+                  atara_pay_http_requests_total{method="POST",route="/v1/wallet-groups/:id/transactions",status_class="2xx"} 42
