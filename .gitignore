@@ -5,3 +5,7 @@ dist/
 .idea/
 .vscode/
 .cursor/
+
+# Generated SDKs — regenerate with `make sdks`. Keeping them out
+# of git keeps the repo lean; releases come from a fresh `make` in CI.
+sdk/

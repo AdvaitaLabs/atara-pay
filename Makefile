@@ -47,6 +47,18 @@ run:
 test:
 	go test ./... -race -count=1
 
+# Integration tests need a real Postgres + Redis. smoke_test gates itself
+# on DATABASE_URL / REDIS_URL so this target is safe to run when the stack
+# is down — it cleanly skips. To run end-to-end:
+#
+#   docker compose up -d && make migrate-up && \
+#     DATABASE_URL=postgres://atara:atara@localhost:5432/atara_pay?sslmode=disable \
+#     REDIS_URL=redis://localhost:6379/0 \
+#     make integration
+.PHONY: integration
+integration:
+	go test -tags=integration ./tests/integration -count=1 -v
+
 .PHONY: lint
 lint:
 	go vet ./...
@@ -64,3 +76,36 @@ openapi-docs:
 	@mkdir -p bin
 	npx --yes @redocly/cli@latest build-docs api/v1/openapi.yaml -o bin/docs.html
 	@echo "docs → bin/docs.html"
+
+# ──────────────────────────────────────────────────────────────────────
+# SDK generation (M12) — npx @openapitools/openapi-generator-cli
+# Each target writes to sdk/<lang>/. Regenerate on every spec change.
+# .openapi-generator-ignore keeps the generator from leaving boilerplate.
+# ──────────────────────────────────────────────────────────────────────
+SDK_DIR ?= sdk
+SPEC := api/v1/openapi.yaml
+OPENAPI_GEN := npx --yes @openapitools/openapi-generator-cli@latest
+
+.PHONY: sdk-ts
+sdk-ts:
+	@mkdir -p $(SDK_DIR)/typescript
+	$(OPENAPI_GEN) generate -i $(SPEC) -g typescript-axios -o $(SDK_DIR)/typescript \
+		--additional-properties=npmName=@atara-xyz/atara-pay,supportsES6=true,withSeparateModelsAndApi=true,apiPackage=apis,modelPackage=models
+	@echo "TS SDK → $(SDK_DIR)/typescript"
+
+.PHONY: sdk-python
+sdk-python:
+	@mkdir -p $(SDK_DIR)/python
+	$(OPENAPI_GEN) generate -i $(SPEC) -g python -o $(SDK_DIR)/python \
+		--additional-properties=packageName=atara_pay,projectName=atara-pay,packageVersion=1.0.0
+	@echo "Python SDK → $(SDK_DIR)/python"
+
+.PHONY: sdk-go
+sdk-go:
+	@mkdir -p $(SDK_DIR)/go
+	$(OPENAPI_GEN) generate -i $(SPEC) -g go -o $(SDK_DIR)/go \
+		--additional-properties=packageName=atarapay,withGoMod=true,enumClassPrefix=true
+	@echo "Go SDK → $(SDK_DIR)/go"
+
+.PHONY: sdks
+sdks: sdk-ts sdk-python sdk-go

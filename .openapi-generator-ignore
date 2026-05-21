@@ -1,0 +1,17 @@
+# Files we always overwrite from the spec:
+# (none excluded — let openapi-generator drive the whole tree)
+
+# But we DO NOT want the generator's stock README / CI templates.
+# It loves to litter these.
+README.md
+.gitignore
+.travis.yml
+.gitlab-ci.yml
+git_push.sh
+
+# Maven / Gradle artifacts when generating Java clients — ignored
+# preemptively in case anyone runs `-g java`.
+pom.xml
+build.gradle*
+gradle/**
+gradlew*
