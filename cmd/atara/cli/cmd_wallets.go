@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 )
 
@@ -20,27 +22,48 @@ func newWalletsCmd() *cobra.Command {
 
 func walletsCreateCmd() *cobra.Command {
 	var ownerType, ownerRef, displayName, chain string
+	var custody, externalTempo, externalCrossmint string
 	c := &cobra.Command{
 		Use:   "create",
 		Short: "POST /v1/wallet-groups (idempotent on owner-ref)",
+		Long: `Create a wallet group. Defaults to platform-custody (Atara/CrossMint
+hold the keys). Pass --custody user with at least one --external-* address to
+register a self-custody group — Atara then never sees a private key for it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := newClient(cmd, true)
 			if err != nil {
 				return err
 			}
-			body, status, err := cl.do(cmd.Context(), "POST", "/v1/wallet-groups", map[string]any{
+			body := map[string]any{
 				"owner":           map[string]string{"type": ownerType, "ref": ownerRef},
 				"display_name":    displayName,
 				"crossmint_chain": chain,
-			})
+			}
+			if custody != "" && custody != "platform" {
+				body["custody"] = custody
+			}
+			if custody == "user" {
+				ext := map[string]string{}
+				if externalTempo != "" {
+					ext["tempo"] = externalTempo
+				}
+				if externalCrossmint != "" {
+					ext["crossmint"] = externalCrossmint
+				}
+				if len(ext) == 0 {
+					return fmt.Errorf("--custody user requires at least one of --external-tempo / --external-crossmint")
+				}
+				body["external_addresses"] = ext
+			}
+			resp, status, err := cl.do(cmd.Context(), "POST", "/v1/wallet-groups", body)
 			if err != nil {
 				return err
 			}
 			// 200 = idempotent reuse, 201 = new
 			if status != 200 && status != 201 {
-				return failResponse(status, body)
+				return failResponse(status, resp)
 			}
-			emit(cmd, body)
+			emit(cmd, resp)
 			return nil
 		},
 	}
@@ -48,6 +71,9 @@ func walletsCreateCmd() *cobra.Command {
 	c.Flags().StringVar(&ownerRef, "owner-ref", "", "customer's external id (required)")
 	c.Flags().StringVar(&displayName, "display-name", "", "human label")
 	c.Flags().StringVar(&chain, "crossmint-chain", "base", "CrossMint chain (base|polygon|solana)")
+	c.Flags().StringVar(&custody, "custody", "platform", "platform (Atara holds keys) | user (you hold keys)")
+	c.Flags().StringVar(&externalTempo, "external-tempo", "", "for --custody user: pre-existing Tempo address you control")
+	c.Flags().StringVar(&externalCrossmint, "external-crossmint", "", "for --custody user: pre-existing CrossMint address you control")
 	_ = c.MarkFlagRequired("owner-ref")
 	return c
 }

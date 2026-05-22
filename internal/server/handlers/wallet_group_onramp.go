@@ -87,6 +87,19 @@ func (h *WalletGroups) CreateOnramp(c *fiber.Ctx) error {
 		})
 	}
 
+	// User-custody onramp needs a CrossMint "linked external wallet" flow
+	// we haven't built yet (M14). For now, only platform-custody onramps go
+	// through.
+	if wallet.Custody == "user" {
+		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+			"error":   "user-custody wallet: onramp into external address not yet supported",
+			"code":    "user_custody_onramp_unsupported",
+			"next":    "M14 will add CrossMint linked-external-wallet onramp",
+			"wallet":  wallet.ID,
+			"custody": wallet.Custody,
+		})
+	}
+
 	// Default the chain to the wallet's chain if the request didn't pin one.
 	chain := req.Chain
 	if chain == "" {

@@ -90,6 +90,19 @@ type CreateGroupRequest struct {
 	DisplayName   string `json:"display_name,omitempty"`
 	// CrossMintChain optionally overrides the default ("base").
 	CrossMintChain string `json:"crossmint_chain,omitempty"`
+
+	// Custody is "platform" (default) or "user". "platform" = Atara/CrossMint
+	// hold the keys (the existing dual-rail behavior). "user" = the caller
+	// already has a wallet elsewhere and just registers the on-chain
+	// address(es); Atara never sees a private key. Write operations on
+	// user-custody wallets require client-side signing, which lands in M14
+	// (prepare/submit endpoints) — until then writes return 501.
+	Custody string `json:"custody,omitempty"`
+
+	// ExternalAddresses is required when Custody="user". Provide at least one
+	// per-rail address. Keys are rail names; values are the on-chain address
+	// already controlled by the caller. Omitted rails get no wallet.
+	ExternalAddresses map[string]string `json:"external_addresses,omitempty"`
 }
 
 // GroupView is the safe-to-return projection of a wallet group plus its
@@ -169,32 +182,73 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 		return c.JSON(toGroupViewWithReuse(existing, wallets, true))
 	}
 
-	// Step 2: create CrossMint wallet via REST (outside DB tx).
+	// Custody branching. "platform" (default) generates / fetches wallets
+	// from the rails. "user" trusts the caller's external addresses and
+	// records them as-is — no rail API calls, no key generation, no key
+	// storage. Tempo and CrossMint each become "user-custody" wallets.
+	custody := "platform"
+	if req.Custody == "user" {
+		custody = "user"
+	}
+
+	// Variables filled by either branch below, consumed by Step 4 (insert).
 	cmChain := req.CrossMintChain
 	if cmChain == "" {
 		cmChain = h.crossMintChainDefault
 	}
-	cmWallet, err := h.crossmint.CreateWallet(ctx, apitypes.CreateWalletRequest{
-		Rail:  apitypes.RailCrossMint,
-		Chain: apitypes.Chain(cmChain),
-		Owner: apitypes.Owner{
-			Type:  "external",
-			Value: fmt.Sprintf("atara:%s:%s", tenantID, req.Owner.Ref),
-		},
-		Type: "smart",
-	})
-	if err != nil {
-		return upstreamError(c, "crossmint", err)
-	}
+	var (
+		cmAddress   string
+		cmLocator   string
+		hasCMWallet bool
+		tempoAddr   string
+		hasTempo    bool
+		encBlob     []byte
+		keyVer      int16
+	)
 
-	// Step 3: generate Tempo keypair, encrypt with the keystore.
-	priv, tempoAddr, err := tempo.GenerateKeypair()
-	if err != nil {
-		return internalError(c, err)
-	}
-	encBlob, keyVer, err := h.ks.Encrypt(priv[:])
-	if err != nil {
-		return internalError(c, err)
+	if custody == "platform" {
+		// Step 2: create CrossMint wallet via REST (outside DB tx).
+		cmWallet, err := h.crossmint.CreateWallet(ctx, apitypes.CreateWalletRequest{
+			Rail:  apitypes.RailCrossMint,
+			Chain: apitypes.Chain(cmChain),
+			Owner: apitypes.Owner{
+				Type:  "external",
+				Value: fmt.Sprintf("atara:%s:%s", tenantID, req.Owner.Ref),
+			},
+			Type: "smart",
+		})
+		if err != nil {
+			return upstreamError(c, "crossmint", err)
+		}
+		cmAddress = cmWallet.Address
+		cmLocator = cmWallet.Locator
+		hasCMWallet = true
+
+		// Step 3: generate Tempo keypair, encrypt with the keystore.
+		priv, addr, gerr := tempo.GenerateKeypair()
+		if gerr != nil {
+			return internalError(c, gerr)
+		}
+		blob, ver, eerr := h.ks.Encrypt(priv[:])
+		if eerr != nil {
+			return internalError(c, eerr)
+		}
+		tempoAddr = addr
+		encBlob = blob
+		keyVer = ver
+		hasTempo = true
+	} else {
+		// custody == "user": only what the caller explicitly registered.
+		// No external service calls, no key material touches this server.
+		if a, ok := req.ExternalAddresses["crossmint"]; ok {
+			cmAddress = a
+			cmLocator = a // no provider id — locator falls back to the address
+			hasCMWallet = true
+		}
+		if a, ok := req.ExternalAddresses["tempo"]; ok {
+			tempoAddr = a
+			hasTempo = true
+		}
 	}
 
 	// Step 4: insert group + 2 wallets in a transaction.
@@ -206,7 +260,6 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 	qtx := h.q.WithTx(tx)
 
 	groupID := id.New(id.PrefixWalletGroup)
-	custody := "platform"
 
 	group, err := qtx.CreateWalletGroup(ctx, sqlcgen.CreateWalletGroupParams{
 		ID:            groupID,
@@ -239,47 +292,63 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 		return internalError(c, err)
 	}
 
-	cmRow, err := qtx.CreateWallet(ctx, sqlcgen.CreateWalletParams{
-		ID:              id.New(id.PrefixWallet),
-		GroupID:         group.ID,
-		TenantID:        tenantID,
-		Rail:            string(apitypes.RailCrossMint),
-		Chain:           cmChain,
-		Address:         cmWallet.Address,
-		ProviderLocator: cmWallet.Locator,
-		Custody:         custody,
-		// EncryptedPrivateKey + KeyVersion stay null — CrossMint holds the
-		// key on their side. The wallets CHECK constraint requires this.
-		Status:   "active",
-		Metadata: []byte("{}"),
-	})
-	if err != nil {
-		return internalError(c, err)
+	// Insert each rail's wallet only if we have an address for it. For
+	// user-custody groups, the caller may omit one rail entirely.
+	createdWallets := make([]sqlcgen.Wallet, 0, 2)
+	if hasCMWallet {
+		cmRow, cerr := qtx.CreateWallet(ctx, sqlcgen.CreateWalletParams{
+			ID:              id.New(id.PrefixWallet),
+			GroupID:         group.ID,
+			TenantID:        tenantID,
+			Rail:            string(apitypes.RailCrossMint),
+			Chain:           cmChain,
+			Address:         cmAddress,
+			ProviderLocator: cmLocator,
+			Custody:         custody,
+			// EncryptedPrivateKey + KeyVersion stay null — CrossMint holds
+			// the key on their side; same for user-custody where the caller
+			// holds it. The wallets CHECK constraint requires NULL here.
+			Status:   "active",
+			Metadata: []byte("{}"),
+		})
+		if cerr != nil {
+			return internalError(c, cerr)
+		}
+		createdWallets = append(createdWallets, cmRow)
 	}
 
-	tpRow, err := qtx.CreateWallet(ctx, sqlcgen.CreateWalletParams{
-		ID:                  id.New(id.PrefixWallet),
-		GroupID:             group.ID,
-		TenantID:            tenantID,
-		Rail:                string(apitypes.RailTempo),
-		Chain:               string(apitypes.ChainTempo),
-		Address:             tempoAddr,
-		ProviderLocator:     tempoAddr, // Tempo locator IS the address
-		Custody:             custody,
-		EncryptedPrivateKey: encBlob,
-		KeyVersion:          pgxInt2(int16(keyVer)),
-		Status:              "active",
-		Metadata:            []byte("{}"),
-	})
-	if err != nil {
-		return internalError(c, err)
+	if hasTempo {
+		params := sqlcgen.CreateWalletParams{
+			ID:              id.New(id.PrefixWallet),
+			GroupID:         group.ID,
+			TenantID:        tenantID,
+			Rail:            string(apitypes.RailTempo),
+			Chain:           string(apitypes.ChainTempo),
+			Address:         tempoAddr,
+			ProviderLocator: tempoAddr, // Tempo locator IS the address
+			Custody:         custody,
+			Status:          "active",
+			Metadata:        []byte("{}"),
+		}
+		// Only platform-custody Tempo wallets carry an encrypted key. The
+		// schema CHECK constraint enforces NULL for user-custody — leave
+		// the fields zero-valued in that branch.
+		if custody == "platform" {
+			params.EncryptedPrivateKey = encBlob
+			params.KeyVersion = pgxInt2(int16(keyVer))
+		}
+		tpRow, terr := qtx.CreateWallet(ctx, params)
+		if terr != nil {
+			return internalError(c, terr)
+		}
+		createdWallets = append(createdWallets, tpRow)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return internalError(c, err)
 	}
 
-	view := toGroupView(group, []sqlcgen.Wallet{cmRow, tpRow})
+	view := toGroupView(group, createdWallets)
 	h.publish(ctx, tenantID, webhooks.EventWalletGroupCreated, view,
 		webhooks.ResourceRefs{GroupID: group.ID})
 	return c.Status(fiber.StatusCreated).JSON(view)
@@ -385,6 +454,33 @@ func validateCreateGroup(r CreateGroupRequest) error {
 	}
 	if r.Owner.Type == "agent" && r.ParentGroupID == "" {
 		return errors.New("parent_group_id is required when owner.type is 'agent'")
+	}
+	// Custody: default "platform" (handled by caller). Only "platform" and
+	// "user" are accepted here. "mpc" is reserved (M15).
+	switch r.Custody {
+	case "", "platform":
+		if len(r.ExternalAddresses) > 0 {
+			return errors.New(`external_addresses only valid when custody="user"`)
+		}
+	case "user":
+		if len(r.ExternalAddresses) == 0 {
+			return errors.New(`external_addresses is required when custody="user"`)
+		}
+		for rail, addr := range r.ExternalAddresses {
+			switch rail {
+			case "tempo", "crossmint":
+			default:
+				return fmt.Errorf("external_addresses: unsupported rail %q", rail)
+			}
+			if addr == "" {
+				return fmt.Errorf("external_addresses.%s: address is empty", rail)
+			}
+			if len(addr) > 200 {
+				return fmt.Errorf("external_addresses.%s: address too long", rail)
+			}
+		}
+	default:
+		return errors.New(`custody must be one of "platform" (default), "user"`)
 	}
 	return nil
 }

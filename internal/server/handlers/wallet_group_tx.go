@@ -111,6 +111,21 @@ func (h *WalletGroups) SendTransaction(c *fiber.Ctx) error {
 		})
 	}
 
+	// User-custody wallets cannot be signed from this server — by definition
+	// the caller holds the private key. The prepare/submit two-step flow
+	// (M14) is the supported path. Until those endpoints land, return 501
+	// with the explicit reason so integrators don't think it's a transient
+	// failure.
+	if wallet.Custody == "user" {
+		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
+			"error":   "user-custody wallet requires client-side signing",
+			"code":    "user_custody_signing_required",
+			"next":    "POST /v1/wallet-groups/{id}/transactions/prepare (M14)",
+			"wallet":  wallet.ID,
+			"custody": wallet.Custody,
+		})
+	}
+
 	// Resolve the (optional) session key. Three guards apply:
 	//   - cross-tenant: another tenant's id must not pass
 	//   - status:       only "active" session keys may authorize
