@@ -240,6 +240,11 @@ func (s *Server) routes() {
 		v1.Get("/wallet-groups", s.wgHandlers.List)
 		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
 		v1.Post("/wallet-groups/:id/transactions", s.wgHandlers.SendTransaction)
+		// User-custody two-step flow (M14 / self-custody Phase 2). For Tempo
+		// only at this stage; CrossMint user-custody onramp/transfer comes
+		// in Phase 3.
+		v1.Post("/wallet-groups/:id/transactions/prepare", s.wgHandlers.PrepareTransaction)
+		v1.Post("/wallet-groups/:id/transactions/submit", s.wgHandlers.SubmitTransaction)
 		v1.Post("/wallet-groups/:id/onramp", s.wgHandlers.CreateOnramp)
 	}
 

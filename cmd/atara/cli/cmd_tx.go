@@ -9,8 +9,96 @@ func newTxCmd() *cobra.Command {
 		Use:   "tx",
 		Short: "Send transfers + on-ramp orders against a wallet group",
 	}
-	cmd.AddCommand(txSendCmd(), txOnrampCmd())
+	cmd.AddCommand(txSendCmd(), txOnrampCmd(), txPrepareCmd(), txSubmitCmd())
 	return cmd
+}
+
+func txPrepareCmd() *cobra.Command {
+	var from, to, amount, asset, memo, idempotencyKey string
+	c := &cobra.Command{
+		Use:   "prepare",
+		Short: "POST /v1/wallet-groups/{from}/transactions/prepare (user-custody)",
+		Long: `Build an unsigned Tempo transfer for a user-custody wallet group.
+Returns the prepare_id plus the unsigned-tx blob the caller signs locally,
+then hands back to "atara tx submit".`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cl, err := newClient(cmd, true)
+			if err != nil {
+				return err
+			}
+			body := map[string]any{
+				"to":     to,
+				"amount": amount,
+				"asset":  asset,
+			}
+			if memo != "" {
+				body["memo"] = memo
+			}
+			if idempotencyKey != "" {
+				body["idempotency_key"] = idempotencyKey
+			}
+			resp, status, err := cl.do(cmd.Context(), "POST",
+				"/v1/wallet-groups/"+from+"/transactions/prepare", body)
+			if err != nil {
+				return err
+			}
+			if status != 200 && status != 201 {
+				return failResponse(status, resp)
+			}
+			emit(cmd, resp)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&from, "from", "", "source wallet group id (required)")
+	c.Flags().StringVar(&to, "to", "", "destination address (required)")
+	c.Flags().StringVar(&amount, "amount", "", "decimal amount as string (required)")
+	c.Flags().StringVar(&asset, "asset", "", "asset symbol e.g. USDC (required)")
+	c.Flags().StringVar(&memo, "memo", "", "free-form memo")
+	c.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "client-supplied dedup key")
+	_ = c.MarkFlagRequired("from")
+	_ = c.MarkFlagRequired("to")
+	_ = c.MarkFlagRequired("amount")
+	_ = c.MarkFlagRequired("asset")
+	return c
+}
+
+func txSubmitCmd() *cobra.Command {
+	var from, prepareID, signedHex string
+	c := &cobra.Command{
+		Use:   "submit",
+		Short: "POST /v1/wallet-groups/{from}/transactions/submit (user-custody)",
+		Long: `Broadcast a client-signed Tempo transaction. Pair with "atara tx prepare":
+prepare returns prepare_id + unsigned bytes; sign those externally (web3 lib,
+hardware wallet, Privy, ...); pass prepare_id and the 0x-prefixed signed
+RLP back here.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cl, err := newClient(cmd, true)
+			if err != nil {
+				return err
+			}
+			body := map[string]any{
+				"prepare_id":    prepareID,
+				"signed_tx_hex": signedHex,
+			}
+			resp, status, err := cl.do(cmd.Context(), "POST",
+				"/v1/wallet-groups/"+from+"/transactions/submit", body)
+			if err != nil {
+				return err
+			}
+			if status != 200 && status != 201 {
+				return failResponse(status, resp)
+			}
+			emit(cmd, resp)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&from, "from", "", "source wallet group id (required)")
+	c.Flags().StringVar(&prepareID, "prepare-id", "", "prepare_id from `atara tx prepare` (required)")
+	c.Flags().StringVar(&signedHex, "signed-tx-hex", "", "0x-prefixed RLP-encoded signed tx (required)")
+	_ = c.MarkFlagRequired("from")
+	_ = c.MarkFlagRequired("prepare-id")
+	_ = c.MarkFlagRequired("signed-tx-hex")
+	return c
 }
 
 func txSendCmd() *cobra.Command {
