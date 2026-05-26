@@ -9,8 +9,54 @@ func newSessionKeysCmd() *cobra.Command {
 		Use:   "session-keys",
 		Short: "Mint, list, and revoke session keys scoped to a wallet group",
 	}
-	cmd.AddCommand(sessionKeysCreateCmd(), sessionKeysListCmd(), sessionKeysRevokeCmd())
+	cmd.AddCommand(
+		sessionKeysCreateCmd(),
+		sessionKeysListCmd(),
+		sessionKeysRevokeCmd(),
+		sessionKeysSubmitAuthorizeCmd(),
+	)
 	return cmd
+}
+
+// sessionKeysSubmitAuthorizeCmd activates a pending_authorize session key
+// minted against a user-custody wallet. The `create` call returned both the
+// session key id and an `unsigned_authorize.raw_unsigned_hex` blob; the
+// caller signs that with the WALLET MASTER KEY (off-server) and passes the
+// resulting RLP back here.
+func sessionKeysSubmitAuthorizeCmd() *cobra.Command {
+	var groupID, signedHex string
+	c := &cobra.Command{
+		Use:   "submit-authorize <session-key-id>",
+		Short: "POST /v1/wallet-groups/{group}/session-keys/{id}/submit-authorize",
+		Long: `Activate a pending_authorize session key by broadcasting the
+wallet-owner-signed authorizeKey tx. Pair with "atara session-keys create"
+against a user-custody wallet: create returns the unsigned authorize bytes;
+sign them externally (hardware wallet, MetaMask, Privy...); pass the signed
+RLP back here.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := newClient(cmd, true)
+			if err != nil {
+				return err
+			}
+			body, status, err := cl.do(cmd.Context(), "POST",
+				"/v1/wallet-groups/"+groupID+"/session-keys/"+args[0]+"/submit-authorize",
+				map[string]any{"signed_tx_hex": signedHex})
+			if err != nil {
+				return err
+			}
+			if status != 200 && status != 201 {
+				return failResponse(status, body)
+			}
+			emit(cmd, body)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&groupID, "group", "", "wallet group id (required)")
+	c.Flags().StringVar(&signedHex, "signed-tx-hex", "", "0x-prefixed signed authorizeKey RLP (required)")
+	_ = c.MarkFlagRequired("group")
+	_ = c.MarkFlagRequired("signed-tx-hex")
+	return c
 }
 
 func sessionKeysCreateCmd() *cobra.Command {

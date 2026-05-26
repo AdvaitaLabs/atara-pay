@@ -239,6 +239,7 @@ func (s *Server) routes() {
 		v1.Post("/wallet-groups", s.wgHandlers.Create)
 		v1.Get("/wallet-groups", s.wgHandlers.List)
 		v1.Get("/wallet-groups/:id", s.wgHandlers.Get)
+		v1.Get("/wallet-groups/:id/capabilities", s.wgHandlers.Capabilities)
 		v1.Post("/wallet-groups/:id/transactions", s.wgHandlers.SendTransaction)
 		// User-custody two-step flow (M14 / self-custody Phase 2). For Tempo
 		// only at this stage; CrossMint user-custody onramp/transfer comes
@@ -253,6 +254,10 @@ func (s *Server) routes() {
 		v1.Post("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.Create)
 		v1.Get("/wallet-groups/:id/session-keys", s.sessionKeyHandlers.List)
 		v1.Delete("/wallet-groups/:id/session-keys/:sk_id", s.sessionKeyHandlers.Revoke)
+		// Phase 4: activate a user-custody session key once the wallet
+		// owner has signed the authorizeKey tx the create call returned.
+		v1.Post("/wallet-groups/:id/session-keys/:sk_id/submit-authorize",
+			s.sessionKeyHandlers.SubmitAuthorize)
 	}
 
 	// Virtual addresses (TIP-1022) — per-customer deposit address for

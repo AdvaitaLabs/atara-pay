@@ -165,19 +165,13 @@ func (h *SessionKeys) Create(c *fiber.Ctx) error {
 		})
 	}
 
-	// Session keys require Atara to mint and encrypt a fresh keypair that
-	// authorizes spends from the parent wallet — that only makes sense when
-	// the parent is platform-custody. For user-custody, the caller would
-	// authorize a sub-key themselves on-chain. Reject cleanly until the
-	// on-chain authorizeKey path is wired up for external wallets (M14).
+	// For user-custody wallets, Atara cannot sign authorizeKey itself
+	// (we have no master key). Branch to the two-step flow: mint the
+	// session keypair, persist as 'pending_authorize', and return an
+	// unsigned authorizeKey tx for the wallet owner to sign. The caller
+	// then sends the signed bytes back via SubmitAuthorize.
 	if wallet.Custody == "user" {
-		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{
-			"error":   "user-custody wallet: session keys must be authorized on-chain by the wallet owner",
-			"code":    "user_custody_session_key_unsupported",
-			"next":    "M14 will add a flow to register externally-signed session keys",
-			"wallet":  wallet.ID,
-			"custody": wallet.Custody,
-		})
+		return h.createUserCustody(c, tenantID, group, wallet, req)
 	}
 
 	// Parse cap fields (integer USD for MVP — matches the limit handlers).
