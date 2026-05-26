@@ -104,6 +104,78 @@ func (a *Adapter) BuildTransfer(
 	}, nil
 }
 
+// BuildAuthorizeKey is the unsigned-tx counterpart of AuthorizeKey: it
+// assembles the AccountKeychain.authorizeKey() precompile call into a
+// LegacyTx, fetches nonce/gas estimates, and returns the RLP blob for the
+// wallet owner to sign client-side.
+//
+// Used by the user-custody session-key flow (Phase 4): the wallet master
+// key lives off-server, so we cannot broadcast directly — we hand the
+// owner an unsigned authorizeKey call, they sign, then we submit via
+// BroadcastSignedTx.
+func (a *Adapter) BuildAuthorizeKey(
+	ctx context.Context,
+	walletAddress string,
+	sessionKeyAddress string,
+	sigType SignatureType,
+	restrictions KeyRestrictions,
+) (*UnsignedTransfer, error) {
+	from := common.HexToAddress(walletAddress)
+
+	calldata, err := PackAuthorizeKey(
+		common.HexToAddress(sessionKeyAddress),
+		sigType,
+		restrictions,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	to := common.HexToAddress(AccountKeychainAddress)
+
+	nonce, err := a.client.Eth().PendingNonceAt(ctx, from)
+	if err != nil {
+		return nil, fmt.Errorf("authorize key build: nonce: %w", err)
+	}
+	gasPrice, err := a.client.Eth().SuggestGasPrice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("authorize key build: gas price: %w", err)
+	}
+	gasLimit, err := a.client.Eth().EstimateGas(ctx, ethereum.CallMsg{
+		From: from, To: &to, Data: calldata,
+	})
+	if err != nil {
+		// Same fallback as AuthorizeKey (signed path) — keychain precompile
+		// gas estimation often refuses on cold-start; observed ~150-200k.
+		gasLimit = 500_000
+	}
+
+	tx := gethTypes.NewTx(&gethTypes.LegacyTx{
+		Nonce:    nonce,
+		To:       &to,
+		Value:    big.NewInt(0),
+		Gas:      gasLimit,
+		GasPrice: gasPrice,
+		Data:     calldata,
+	})
+
+	raw, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("marshal unsigned authorize tx: %w", err)
+	}
+
+	return &UnsignedTransfer{
+		ChainID:        a.client.ChainID().Int64(),
+		Nonce:          nonce,
+		To:             to.Hex(),
+		ValueHex:       "0x0",
+		GasLimit:       gasLimit,
+		GasPriceHex:    "0x" + gasPrice.Text(16),
+		DataHex:        "0x" + hex.EncodeToString(calldata),
+		RawUnsignedHex: "0x" + hex.EncodeToString(raw),
+	}, nil
+}
+
 // BroadcastSignedTx accepts a 0x-prefixed RLP-encoded signed transaction
 // (matching what eth_sendRawTransaction expects) and broadcasts it to the
 // Tempo RPC. Returns the on-chain transaction hash.
