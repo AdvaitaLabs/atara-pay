@@ -1,9 +1,14 @@
 # Local + CI integration-test stack.
 #
-#   docker compose -f docker-compose.yml up -d            # boot pg + redis
-#   make migrate-up                                       # apply schema
-#   DATABASE_URL=... REDIS_URL=... go test ./tests/integration -count=1
-#   docker compose down -v                                 # nuke volumes
+# Quick start:
+#   cp .env.example .env       # then edit secrets / RPC URLs
+#   ./scripts/deploy-local.sh  # builds + runs + migrates + smoke-checks /health
+#
+# Manual:
+#   docker compose up -d postgres redis            # core deps
+#   docker compose run --rm migrate                # apply migrations
+#   docker compose up -d atara-pay                 # start gateway
+#   docker compose down -v                         # nuke volumes
 #
 # Volumes are named so successive runs keep data; pass `-v` to wipe.
 
@@ -37,6 +42,72 @@ services:
       interval: 2s
       timeout: 2s
       retries: 20
+
+  # One-shot migration runner. Exits 0 once the DB is at head. Re-run with
+  # `docker compose run --rm migrate` after editing migration files.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    container_name: atara_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./internal/db/migrations:/migrations:ro
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://atara:atara@postgres:5432/atara_pay?sslmode=disable",
+        "up",
+      ]
+    restart: "no"
+
+  atara-pay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ATARA_VERSION: "${ATARA_VERSION:-dev}"
+    image: atara-pay:${ATARA_VERSION:-dev}
+    container_name: atara_pay
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # Everything below is read by internal/config/config.go.
+      ATARA_PAY_PORT:        "8080"
+      ATARA_PAY_ENVIRONMENT: "${ATARA_PAY_ENVIRONMENT:-staging}"
+      ATARA_PAY_DEFAULT_RAIL: "${ATARA_PAY_DEFAULT_RAIL:-tempo}"
+
+      DATABASE_URL: "postgres://atara:atara@postgres:5432/atara_pay?sslmode=disable"
+      REDIS_URL:    "redis://redis:6379/0"
+
+      SESSION_SIGNING_KEY: "${SESSION_SIGNING_KEY}"
+
+      # Tempo: required for the user-custody / on-chain flows.
+      TEMPO_RPC_URL:  "${TEMPO_RPC_URL:-https://rpc.moderato.tempo.xyz}"
+      TEMPO_CHAIN_ID: "${TEMPO_CHAIN_ID:-42431}"
+
+      # CrossMint: optional. Leave unset to run a Tempo-only deploy. When set,
+      # the gateway also exposes the platform-custody CrossMint flow + fiat
+      # onramp.
+      CROSSMINT_API_KEY:  "${CROSSMINT_API_KEY:-}"
+      CROSSMINT_BASE_URL: "${CROSSMINT_BASE_URL:-https://staging.crossmint.com}"
+
+      # Keystore master keys. At least V1 is required to encrypt private keys.
+      ATARA_PAY_MASTER_KEY_V1: "${ATARA_PAY_MASTER_KEY_V1}"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
 
 volumes:
   atara_pg_data:

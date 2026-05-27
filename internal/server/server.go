@@ -146,9 +146,12 @@ func New(d Deps) *Server {
 			webhooks.NewLimitEmitter(publisher),
 		)
 
-		// Wallet-group handler needs all four extra deps. Missing any
-		// disables the endpoint — server still boots.
-		if d.CrossMint != nil && d.Tempo != nil && d.Keystore != nil {
+		// Wallet-group handler needs Tempo + keystore at minimum. CrossMint
+		// is optional: when nil, the handler refuses platform-custody groups
+		// that need a CrossMint wallet, but user-custody / Tempo-only flows
+		// still work — useful in CI and self-custody-only test deploys that
+		// don't have CrossMint staging credentials.
+		if d.Tempo != nil && d.Keystore != nil {
 			s.wgHandlers = handlers.NewWalletGroups(
 				d.Pool, d.CrossMint, d.Tempo, d.Keystore, limitsSvc, publisher,
 			)

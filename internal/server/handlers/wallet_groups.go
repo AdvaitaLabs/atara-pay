@@ -207,22 +207,28 @@ func (h *WalletGroups) Create(c *fiber.Ctx) error {
 	)
 
 	if custody == "platform" {
-		// Step 2: create CrossMint wallet via REST (outside DB tx).
-		cmWallet, err := h.crossmint.CreateWallet(ctx, apitypes.CreateWalletRequest{
-			Rail:  apitypes.RailCrossMint,
-			Chain: apitypes.Chain(cmChain),
-			Owner: apitypes.Owner{
-				Type:  "external",
-				Value: fmt.Sprintf("atara:%s:%s", tenantID, req.Owner.Ref),
-			},
-			Type: "smart",
-		})
-		if err != nil {
-			return upstreamError(c, "crossmint", err)
+		// Step 2: create CrossMint wallet via REST (outside DB tx). When the
+		// gateway isn't configured with a CrossMint adapter (CI / self-custody-
+		// only deploys), skip the CrossMint half entirely — platform-custody
+		// groups still get a working Tempo wallet, but the CrossMint rail is
+		// simply absent from the resulting group view.
+		if h.crossmint != nil {
+			cmWallet, err := h.crossmint.CreateWallet(ctx, apitypes.CreateWalletRequest{
+				Rail:  apitypes.RailCrossMint,
+				Chain: apitypes.Chain(cmChain),
+				Owner: apitypes.Owner{
+					Type:  "external",
+					Value: fmt.Sprintf("atara:%s:%s", tenantID, req.Owner.Ref),
+				},
+				Type: "smart",
+			})
+			if err != nil {
+				return upstreamError(c, "crossmint", err)
+			}
+			cmAddress = cmWallet.Address
+			cmLocator = cmWallet.Locator
+			hasCMWallet = true
 		}
-		cmAddress = cmWallet.Address
-		cmLocator = cmWallet.Locator
-		hasCMWallet = true
 
 		// Step 3: generate Tempo keypair, encrypt with the keystore.
 		priv, addr, gerr := tempo.GenerateKeypair()

@@ -77,6 +77,17 @@ func (h *WalletGroups) CreateOnramp(c *fiber.Ctx) error {
 
 	// Onramp always goes through the CrossMint wallet — the only rail with
 	// a fiat ramp today.
+	// Onramp goes through CrossMint, which is the only rail with a fiat
+	// ramp today. When the gateway isn't configured with a CrossMint
+	// adapter at all (Tempo-only deploys), fail cleanly rather than nil-
+	// dereferencing further down.
+	if h.crossmint == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "onramp is not enabled on this gateway (CrossMint adapter not configured)",
+			"code":  "onramp_not_configured",
+		})
+	}
+
 	wallet, err := h.q.GetWalletByGroupAndRail(ctx, sqlcgen.GetWalletByGroupAndRailParams{
 		GroupID: group.ID,
 		Rail:    string(apitypes.RailCrossMint),
